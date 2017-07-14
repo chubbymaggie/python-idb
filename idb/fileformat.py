@@ -4,6 +4,7 @@ lots of inspiration from: https://github.com/nlitsme/pyidbutil
 import abc
 import struct
 import logging
+import functools
 from collections import namedtuple
 
 import vstruct
@@ -13,6 +14,7 @@ from vstruct.primitives import v_uint16
 from vstruct.primitives import v_uint32
 from vstruct.primitives import v_uint64
 
+import idb
 import idb.netnode
 
 
@@ -68,7 +70,7 @@ class FileHeader(vstruct.VStruct):
         self.checksums.append(self.checksum6)
 
     def validate(self):
-        if self.signature not in (b'IDA1' or b'IDA2'):
+        if self.signature not in (b'IDA1', b'IDA2'):
             raise ValueError('bad signature')
         if self.sig2 != 0xAABBCCDD:
             raise ValueError('bad sig2')
@@ -197,6 +199,7 @@ class Page(vstruct.VStruct):
         +-----------------------------+
 
     '''
+
     def __init__(self, page_size):
         vstruct.VStruct.__init__(self)
         self.ppointer = v_uint32()
@@ -286,6 +289,7 @@ class FindStrategy(object):
     the method will update the cursor as it navigates the btree.
     '''
     __meta__ = abc.ABCMeta
+
     @abc.abstractmethod
     def find(self, cursor, key):
         raise NotImplementedError()
@@ -296,6 +300,7 @@ class ExactMatchStrategy(FindStrategy):
     strategy used to find the entry with exactly the key provided.
     if the exact key is not found, `KeyError` is raised.
     '''
+
     def _find(self, cursor, page_number, key):
         page = cursor.index.get_page(page_number)
         cursor.path.append(page)
@@ -339,6 +344,7 @@ class PrefixMatchStrategy(FindStrategy):
     it may be an exact match, or an exact match does not exist, and the result starts with the given key.
     if no entries start with the given key, `KeyError` is raised.
     '''
+
     def _find(self, cursor, page_number, key):
         page = cursor.index.get_page(page_number)
         cursor.path.append(page)
@@ -364,7 +370,8 @@ class PrefixMatchStrategy(FindStrategy):
                     return
                 elif entry_key.startswith(key):
                     # the sub-page pointed to by this entry contains larger entries.
-                    # so we need to look at the sub-page pointed to by the last entry (or ppointer).
+                    # so we need to look at the sub-page pointed to by the last
+                    # entry (or ppointer).
                     return self._find(cursor, next_page, key)
                 elif entry_key > key:
                     # as soon as we reach greater entries, we'll never match
@@ -383,9 +390,11 @@ class PrefixMatchStrategy(FindStrategy):
 class RoundDownMatchStrategy(FindStrategy):
     '''
     strategy used to find the matching key, or the key just less than the given key.
-    it may be an exact match, or an exact match does not exist, and the result is less than the given key.
+    it may be an exact match, or an exact match does not exist,
+     and the result is less than the given key.
     if no entries are less than the given key, `KeyError` is raised.
     '''
+
     def _find(self, cursor, page_number, key):
         page = cursor.index.get_page(page_number)
         cursor.path.append(page)
@@ -418,7 +427,8 @@ class RoundDownMatchStrategy(FindStrategy):
                     return
                 elif entry_key > key:
                     if i == 0:
-                        # may raise KeyError, and its meant to bubble all the way up.
+                        # may raise KeyError, and its meant to bubble all the
+                        # way up.
                         return self._find(cursor, page.ppointer, key)
                     else:
                         try:
@@ -448,6 +458,7 @@ class MinKeyStrategy(FindStrategy):
     strategy used to find the minimum key in the index.
     note: this completely ignores the provided key.
     '''
+
     def _find(self, cursor, page_number):
         page = cursor.index.get_page(page_number)
         cursor.path.append(page)
@@ -468,6 +479,7 @@ class MaxKeyStrategy(FindStrategy):
     strategy used to find the maximum key in the index.
     note: this completely ignores the provided key.
     '''
+
     def _find(self, cursor, page_number):
         page = cursor.index.get_page(page_number)
         cursor.path.append(page)
@@ -498,16 +510,17 @@ class Cursor(object):
     represents a particular location in the b-tree.
     can be navigated "forward" and "backwards".
     '''
+
     def __init__(self, index):
         super(Cursor, self).__init__()
         self.index = index
 
-        # ordered list of pages from root to leaf that we traversed to get to this point
+        # ordered list of pages from root to leaf that we traversed to get to
+        # this point
         self.path = []
 
         # populated once found
         self.entry = None
-
 
         self.entry_number = None
 
@@ -523,13 +536,11 @@ class Cursor(object):
         #  the linear scan below is simpler to read, so we'll use that until it becomes an issue.
         if page.is_leaf():
             for i, entry in enumerate(page.get_entries()):
-                # TODO: exact match only
                 if key == entry.key:
                     return i
         else:
             for i, entry in enumerate(page.get_entries()):
                 entry_key = bytes(entry.key)
-                # TODO: exact match only
                 if key == entry_key:
                     return i
                 elif key < entry_key:
@@ -639,14 +650,16 @@ class Cursor(object):
 
                 # entry_number now points to the least-greater entry relative to start key.
                 # this should be the entry that points to the page from which we just came.
-                # we'll want to return the key from the entry that is just smaller than this one.
+                # we'll want to return the key from the entry that is just
+                # smaller than this one.
 
                 self.entry = current_page.get_entry(entry_number - 1)
                 self.entry_number = entry_number - 1
                 return
 
             else:  # is inner entry.
-                # simple case: simply decrement the entry number in the current node.
+                # simple case: simply decrement the entry number in the current
+                # node.
                 next_entry_number = self.entry_number - 1
                 next_entry = current_page.get_entry(next_entry_number)
 
@@ -689,9 +702,10 @@ class ID0(vstruct.VStruct):
     use `.find()` to identify a matching entry, and use the resulting cursor
      instance to access the value, or traverse to less/greater entries.
     '''
+
     def __init__(self, buf, wordsize):
         vstruct.VStruct.__init__(self)
-        self.buf = memoryview(buf)
+        self.buf = idb.memview(buf)
         self.wordsize = wordsize
 
         self.next_free_offset = v_uint32()
@@ -768,16 +782,15 @@ class SegmentBounds(vstruct.VStruct):
     '''
     specifies the range of a segment.
     '''
-    def __init__(self, wordsize=4):
+
+    def __init__(self, wordsize):
         vstruct.VStruct.__init__(self)
 
         self.wordsize = wordsize
         if wordsize == 4:
             self.v_word = v_uint32
-            self.word_fmt = "I"
         elif wordsize == 8:
             self.v_word = v_uint64
-            self.word_fmt = "Q"
         else:
             raise RuntimeError('unexpected wordsize')
 
@@ -791,16 +804,14 @@ class ID1(vstruct.VStruct):
     '''
     PAGE_SIZE = 0x2000
 
-    def __init__(self, wordsize=4, buf=None):
+    def __init__(self, wordsize, buf=None):
         vstruct.VStruct.__init__(self)
 
         self.wordsize = wordsize
         if wordsize == 4:
             self.v_word = v_uint32
-            self.word_fmt = "I"
         elif wordsize == 8:
             self.v_word = v_uint64
-            self.word_fmt = "Q"
         else:
             raise RuntimeError('unexpected wordsize')
 
@@ -821,7 +832,10 @@ class ID1(vstruct.VStruct):
 
     def pcb_segment_count(self):
         # TODO: pass wordsize
-        self['_segments'].vsAddElements(self.segment_count, SegmentBounds)
+        self['_segments'].vsAddElements(self.segment_count,
+                                        functools.partial(
+                                            SegmentBounds,
+                                            self.wordsize))
         offset = 0
         for i in range(self.segment_count):
             segment = self._segments[i]
@@ -913,7 +927,7 @@ class NAM(vstruct.VStruct):
     '''
     PAGE_SIZE = 0x2000
 
-    def __init__(self, wordsize=4, buf=None):
+    def __init__(self, wordsize, buf=None):
         vstruct.VStruct.__init__(self)
 
         self.wordsize = wordsize
@@ -932,6 +946,8 @@ class NAM(vstruct.VStruct):
         self.unk0C = v_uint32()      # 0x800
         self.page_count = v_uint32()
         self.unk14 = self.v_word()   # 0x0
+        # this appears to actually be the number of dwords used by the names.
+        # so for an .i64, this is 2x the name count.
         self.name_count = v_uint32()
         self.padding = v_bytes(size=NAM.PAGE_SIZE - (6 * 4 + wordsize))
         self.buffer = v_bytes()
@@ -953,7 +969,11 @@ class NAM(vstruct.VStruct):
         return True
 
     def names(self):
-        fmt = "<{0.name_count:d}{0.word_fmt:s}".format(self)
+        count = self.name_count
+        if self.wordsize == 8:
+            count //= 2
+
+        fmt = "<{count:d}{word_fmt:s}".format(count=count, word_fmt=self.word_fmt)
         size = struct.calcsize(fmt)
         if size > len(self.buffer):
             raise ValueError('buffer too small')
@@ -997,7 +1017,7 @@ class IDB(vstruct.VStruct):
     def __init__(self, buf):
         vstruct.VStruct.__init__(self)
         # we use a memoryview since we'll take a bunch of read-only subslices.
-        self.buf = memoryview(buf)
+        self.buf = idb.memview(buf)
 
         # list of parsed Section instances or None.
         # the entries should line up with the SECTIONS definition.
@@ -1015,13 +1035,14 @@ class IDB(vstruct.VStruct):
         # these are the only true vstruct fields for this struct.
         self.header = FileHeader()
 
-        self.wordsize = 4
+        # updated once header is parsed.
+        self.wordsize = 0
 
     def pcb_header(self):
         if self.header.signature == b'IDA1':
-            self.wordize = 4
+            self.wordsize = 4
         elif self.header.signature == b'IDA2':
-            self.wordize = 8
+            self.wordsize = 8
         else:
             raise RuntimeError('unexpected file signature: %s' % (self.header.signature))
 

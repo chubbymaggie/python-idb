@@ -15,16 +15,17 @@ from setuptools import setup, find_packages
 
 setup(
     name='python-idb',
-    version='0.1',
+    version='0.3.1',
     description='Pure Python parser for IDA Pro databases (.idb files)',
     author='Willi Ballenthin',
     author_email='willi.ballenthin@gmail.com',
     url='https://github.com/williballenthin/python-idb',
     license='Apache License 2.0',
     install_requires=[
-        "hexdump",
+        'six',
+        'hexdump',
         'capstone',
-        "vivisect-vstruct-wb>=1.0.3",
+        'vivisect-vstruct-wb>=1.0.3',
     ],
     packages=find_packages(exclude=['*.tests', '*.tests.*']),
     entry_points={

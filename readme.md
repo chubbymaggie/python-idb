@@ -1,3 +1,5 @@
+[![Build Status](https://travis-ci.org/williballenthin/python-idb.svg?branch=master)](https://travis-ci.org/williballenthin/python-idb)
+
 # python-idb
 
 python-idb is a library for accessing the contents of [IDA Pro](https://www.hex-rays.com/products/ida/) databases (.idb files).
@@ -51,8 +53,8 @@ The target script `yara_fn.py` has only been slightly modified:
 
 ## what works
 
-  - 50 unit tests that demonstrate functionality including file format, B-tree, analysis, and idaapi features.
-  - read-only parsing of .idb files from IDA Pro v6.95
+  - ~250 unit tests that demonstrate functionality including file format, B-tree, analysis, and idaapi features.
+  - read-only parsing of .idb and .i64 files from IDA Pro v6.95 and v7.0
     - extraction of file sections
     - B-tree lookups and queries (ID0 section)
     - flag enumeration (ID1 section)
@@ -74,7 +76,7 @@ The target script `yara_fn.py` has only been slightly modified:
     - `Functions`
     - `FlowChart` (basic blocks)
     - lots and lots of flags
-  - Python 3.x compatibility
+  - Python 2.7 & 3.x compatibility
 
 
 ## what doesn't quite work
@@ -82,10 +84,8 @@ The target script `yara_fn.py` has only been slightly modified:
 support for the following features are feasible and planned, but not yet implemented:
 
   - compressed databases
-  - .i64 files
-  - Python 2.7 compatibility
   - performance (there's no caching yet for code clarity)
-  - databases from versions other than v6.95
+  - databases from versions other than v6.95 and v7.0b
   - parsing TIL section
 
 
@@ -96,7 +96,7 @@ support for the following features are feasible and planned, but not yet impleme
 
 ## getting started
 
-python-idb is a pure-Python (currently: 3.x) library, with the exception of Capstone (required only when calling disassembly APIs).
+python-idb is a pure-Python library, with the exception of Capstone (required only when calling disassembly APIs).
 You can install it via pip or `setup.py install`, both of which should handle depedency resolution:
 
 ```

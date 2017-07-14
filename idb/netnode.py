@@ -2,6 +2,8 @@ import struct
 import logging
 from collections import namedtuple
 
+import six
+
 
 logger = logging.getLogger(__name__)
 
@@ -42,10 +44,10 @@ def make_key(nodeid, tag=None, index=None, wordsize=4):
     else:
         raise ValueError('unexpected wordsize')
 
-    if isinstance(nodeid, str):
+    if isinstance(nodeid, six.string_types):
         return b'N' + nodeid.encode('utf-8')
 
-    elif isinstance(nodeid, int):
+    elif isinstance(nodeid, six.integer_types):
         if tag is None:
             raise ValueError('tag required')
         if not isinstance(tag, str):
@@ -58,15 +60,21 @@ def make_key(nodeid, tag=None, index=None, wordsize=4):
         if index is None:
             return b'.' + struct.pack('>' + wordformat + 'c', nodeid, tag)
         else:
-            return b'.' + struct.pack('>' + wordformat + 'ci', nodeid, tag, index)
+            return b'.' + struct.pack('>' + wordformat + 'c' + wordformat.lower(), nodeid, tag, index)
     else:
-        raise ValueError('unexpected type of nodeid')
+        raise ValueError('unexpected type of nodeid: ' + str(type(nodeid)))
 
 
 ComplexKey = namedtuple('ComplexKey', ['nodeid', 'tag', 'index'])
 
+TAG_LENGTH = 1
+KEY_HEADER_LENGTH = 1
+
 
 def parse_key(buf, wordsize=4):
+    if six.indexbytes(buf, 0x0) != 0x2E:
+        raise ValueError('buf is not a complex key')
+
     if wordsize == 4:
         wordformat = 'I'
     elif wordsize == 8:
@@ -74,20 +82,18 @@ def parse_key(buf, wordsize=4):
     else:
         raise ValueError('unexpected wordsize')
 
-    if buf[0] != 0x2E:
-        raise ValueError('buf is not a complex key')
-
     nodeid, tag = struct.unpack_from('>' + wordformat + 'c', buf, 1)
     tag = tag.decode('ascii')
-    if len(buf) > 1 + 4 + 1:
-        index = struct.unpack_from('>' + wordformat.lower(), buf, 6)[0]
+    if len(buf) > TAG_LENGTH + wordsize + KEY_HEADER_LENGTH:
+        offset = TAG_LENGTH + KEY_HEADER_LENGTH + wordsize
+        index = struct.unpack_from('>' + wordformat.lower(), buf, offset)[0]
     else:
         index = None
 
     return ComplexKey(nodeid, tag, index)
 
 
-def as_int(buf):
+def as_uint(buf, wordsize=None):
     if len(buf) == 1:
         return struct.unpack('<B', buf)[0]
     elif len(buf) == 2:
@@ -100,7 +106,20 @@ def as_int(buf):
         return RuntimeError('unexpected buf size')
 
 
-def as_string(buf):
+def as_int(buf, wordsize=None):
+    if len(buf) == 1:
+        return struct.unpack('<b', buf)[0]
+    elif len(buf) == 2:
+        return struct.unpack('<h', buf)[0]
+    elif len(buf) == 4:
+        return struct.unpack('<l', buf)[0]
+    elif len(buf) == 8:
+        return struct.unpack('<q', buf)[0]
+    else:
+        return RuntimeError('unexpected buf size')
+
+
+def as_string(buf, wordsize=None):
     return bytes(buf).rstrip(b'\x00').decode('utf-8').rstrip('\x00')
 
 
@@ -147,15 +166,22 @@ class Netnode(object):
         else:
             raise RuntimeError('unexpected wordsize')
 
-        if isinstance(nodeid, str):
+        if isinstance(nodeid, six.string_types):
             key = make_key(nodeid, wordsize=self.wordsize)
             cursor = self.idb.id0.find(key)
-            self.nodeid = as_int(cursor.value)
+            self.nodeid = as_uint(cursor.value)
             logger.info('resolved string netnode %s to %x', nodeid, self.nodeid)
-        elif isinstance(nodeid, int):
+        elif isinstance(nodeid, six.integer_types):
             self.nodeid = nodeid
         else:
             raise ValueError('unexpected type for nodeid')
+
+    @staticmethod
+    def get_nodebase(db):
+        if db.wordsize == 4:
+            return 0xFF000000
+        elif db.wordsize == 8:
+            return 0xFF00000000000000
 
     def name(self):
         '''
@@ -310,7 +336,7 @@ class Netnode(object):
             return False
 
     def long_value(self):
-        return as_int(self.valobj())
+        return as_uint(self.valobj())
 
     def blobsize(self):
         '''
