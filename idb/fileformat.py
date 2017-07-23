@@ -2,6 +2,7 @@
 lots of inspiration from: https://github.com/nlitsme/pyidbutil
 '''
 import abc
+import zlib
 import struct
 import logging
 import functools
@@ -79,25 +80,47 @@ class FileHeader(vstruct.VStruct):
         return True
 
 
+class COMPRESSION_METHOD:
+    NONE = 0
+    ZLIB = 2
+
+
 class SectionHeader(vstruct.VStruct):
     def __init__(self):
         vstruct.VStruct.__init__(self)
-        self.is_compressed = v_uint8()
+        self.compression_method = v_uint8()
         self.length = v_uint64()
+        self.is_compressed = False
+
+    def pcb_compression_method(self):
+        if self.compression_method == COMPRESSION_METHOD.NONE:
+            self.is_compressed = False
+        else:
+            self.is_compressed = True
 
 
 class Section(vstruct.VStruct):
     def __init__(self):
         vstruct.VStruct.__init__(self)
         self.header = SectionHeader()
-        self.contents = v_bytes()
+        self._contents = v_bytes()
+        self.contents = b''
+
+    def vsEmit(self, **kwargs):
+        if self.header.is_compressed:
+            raise NotImplementedError('Section may not be serialized because it was compressed')
+
+        vstruct.VStruct.vsEmit(self, **kwargs)
 
     def pcb_header(self):
-        if self.header.is_compressed:
-            # TODO: support this.
-            raise NotImplementedError('compressed section')
+        self['_contents'].vsSetLength(self.header.length)
 
-        self['contents'].vsSetLength(self.header.length)
+    def pcb__contents(self):
+        if not self.header.is_compressed:
+            self.contents = self._contents
+        else:
+            self.contents = zlib.decompress(self._contents)
+            logger.debug('decompressed parsed section.')
 
     def validate(self):
         if self.header.length == 0:
@@ -250,6 +273,31 @@ class Page(vstruct.VStruct):
         for entry in self._entries:
             yield entry
 
+    def find_index(self, key):
+        '''
+        find the index of the exact match, or in the case of a branch node,
+         the index of the least-greater entry.
+        '''
+        # implementation note:
+        #  suprisingly, using a binary search here does not substantially improve performance.
+        #  this is probably the the dominating operations are parsing and allocating entries.
+        #  the linear scan below is simpler to read, so we'll use that until it becomes an issue.
+        if self.is_leaf():
+            for i, entry in enumerate(self.get_entries()):
+                if key == entry.key:
+                    return i
+        else:
+            for i, entry in enumerate(self.get_entries()):
+                entry_key = bytes(entry.key)
+                if key == entry_key:
+                    return i
+                elif key < entry_key:
+                    # this is the least-greater entry
+                    return i
+                else:
+                    continue
+        raise KeyError(key)
+
     def get_entry(self, entry_number):
         '''
         get the entry at the given index.
@@ -307,7 +355,7 @@ class ExactMatchStrategy(FindStrategy):
 
         is_largest = False
         try:
-            entry_number = cursor.find_index(page, key)
+            entry_number = page.find_index(key)
         except KeyError:
             # an entry larger than the given key is not found.
             # but we know we should be searching this node,
@@ -524,32 +572,6 @@ class Cursor(object):
 
         self.entry_number = None
 
-    # TODO: consider moving this to the Page class.
-    def find_index(self, page, key):
-        '''
-        find the index of the exact match, or in the case of a branch node,
-         the index of the least-greater entry.
-        '''
-        # implementation note:
-        #  suprisingly, using a binary search here does not substantially improve performance.
-        #  this is probably the the dominating operations are parsing and allocating entries.
-        #  the linear scan below is simpler to read, so we'll use that until it becomes an issue.
-        if page.is_leaf():
-            for i, entry in enumerate(page.get_entries()):
-                if key == entry.key:
-                    return i
-        else:
-            for i, entry in enumerate(page.get_entries()):
-                entry_key = bytes(entry.key)
-                if key == entry_key:
-                    return i
-                elif key < entry_key:
-                    # this is the least-greater entry
-                    return i
-                else:
-                    continue
-        raise KeyError(key)
-
     def next(self):
         '''
         traverse to the next entry.
@@ -574,7 +596,7 @@ class Cursor(object):
 
                     current_page = self.path[-1]
                     try:
-                        entry_number = self.find_index(current_page, start_key)
+                        entry_number = current_page.find_index(start_key)
                     except KeyError:
                         # not found, becaues its too big for this node.
                         # so we need to go higher.
@@ -637,7 +659,7 @@ class Cursor(object):
 
                     current_page = self.path[-1]
                     try:
-                        entry_number = self.find_index(current_page, start_key)
+                        entry_number = current_page.find_index(start_key)
                     except KeyError:
                         entry_number = current_page.entry_count
 
@@ -716,16 +738,25 @@ class ID0(vstruct.VStruct):
         self.unk12 = v_uint8()
         self.signature = v_bytes(size=0x09)
 
+        self._page_cache = {}
+
     def get_page_buffer(self, page_number):
         if page_number < 1:
             logger.warning('unexpected page number requested: %d', page_number)
+
         offset = self.page_size * page_number
         return self.buf[offset:offset + self.page_size]
 
     def get_page(self, page_number):
+        page = self._page_cache.get(page_number, None)
+        if page is not None:
+            return page
+
         buf = self.get_page_buffer(page_number)
         page = Page(self.page_size)
         page.vsParse(buf)
+
+        self._page_cache[page_number] = page
         return page
 
     def find(self, key, strategy=EXACT_MATCH):

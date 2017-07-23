@@ -6,6 +6,13 @@ import pytest
 import idb
 
 
+try:
+    import capstone
+    no_capstone = False
+except:
+    no_capstone = True
+
+
 CD = os.path.dirname(__file__)
 
 
@@ -26,6 +33,20 @@ def kernel32_idb():
 @pytest.yield_fixture
 def small_idb():
     path = os.path.join(CD, 'data', 'small', 'small-colored.idb')
+    with idb.from_file(path) as db:
+        yield db
+
+
+@pytest.yield_fixture
+def compressed_idb():
+    path = os.path.join(CD, 'data', 'compressed', 'kernel32.idb')
+    with idb.from_file(path) as db:
+        yield db
+
+
+@pytest.yield_fixture
+def compressed_i64():
+    path = os.path.join(CD, 'data', 'compressed', 'kernel32.i64')
     with idb.from_file(path) as db:
         yield db
 
@@ -112,3 +133,6 @@ def kern32_test(specs=None):
         ids.append(sversion + '/' + sbitness)
 
     return pytest.mark.parametrize('kernel32_idb,version,bitness,expected', params, ids=ids)
+
+
+requires_capstone = pytest.mark.skipif(no_capstone, reason='capstone not installed')

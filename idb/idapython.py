@@ -598,11 +598,37 @@ class idc:
             raise ValueError('unknown attr: %x' % (attr))
 
     def GetFunctionName(self, ea):
+        func = self.api.ida_funcs.get_func(ea)
+        # ensure this is a function
+        if func.startEA != ea:
+            raise KeyError(ea)
+
+        # shouldn't be a chunk
+        if is_flag_set(func.flags, func.FUNC_TAIL):
+            raise KeyError(ea)
+
         nn = self.api.ida_netnode.netnode(ea)
-        return nn.name()
+        try:
+            return nn.name()
+        except:
+            if self.idb.wordsize == 4:
+                return 'sub_%04x' % (ea)
+            elif self.idb.wordsize == 8:
+                return 'sub_%08x' % (ea)
+            else:
+                raise RuntimeError('unexpected wordsize')
 
     def GetInputMD5(self):
         return idb.analysis.Root(self.idb).md5
+
+    def Comment(self, ea):
+        return self.api.ida_bytes.get_cmt(ea, False)
+
+    def RptCmt(self, ea):
+        return self.api.ida_bytes.get_cmt(ea, True)
+
+    def GetCommentEx(self, ea, repeatable):
+        return self.api.ida_bytes.get_cmt(ea, repeatable)
 
     @staticmethod
     def hasValue(flags):
@@ -709,6 +735,17 @@ class ida_bytes:
     def __init__(self, db, api):
         self.idb = db
         self.api = api
+
+    def get_cmt(self, ea, repeatable):
+        flags = self.api.idc.GetFlags(ea)
+        if not self.has_cmt(flags):
+            raise KeyError(ea)
+
+        nn = self.api.ida_netnode.netnode(ea)
+        if repeatable:
+            return nn.supstr(tag='S', index=1)
+        else:
+            return nn.supstr(tag='S', index=0)
 
     @staticmethod
     def isFunc(flags):
@@ -1323,7 +1360,13 @@ class idautils:
         return sorted(idb.analysis.Segments(self.idb).segments.keys())
 
     def Functions(self):
-        return list(sorted(idb.analysis.Functions(self.idb).functions.keys()))
+        ret = []
+        for ea, func in idb.analysis.Functions(self.idb).functions.items():
+            # we won't report chunks
+            if is_flag_set(func.flags, func.FUNC_TAIL):
+                continue
+            ret.append(func.startEA)
+        return list(sorted(ret))
 
 
 class IDAPython:
