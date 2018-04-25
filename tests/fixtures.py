@@ -51,6 +51,13 @@ def compressed_i64():
         yield db
 
 
+@pytest.yield_fixture
+def elf_idb():
+    path = os.path.join(CD, 'data', 'elf', 'ls.idb')
+    with idb.from_file(path) as db:
+        yield db
+
+
 def load_idb(path):
     with open(path, 'rb') as f:
         return idb.from_buffer(f.read())
@@ -110,6 +117,7 @@ def kern32_test(specs=None):
         expected = spec[2]
 
         sversion = {
+            500: 'v5.0',
             695: 'v6.95',
             700: 'v7.0b',
         }[version]

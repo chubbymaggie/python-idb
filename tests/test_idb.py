@@ -3,6 +3,7 @@ import binascii
 
 from fixtures import *
 
+import idb.netnode
 import idb.fileformat
 
 
@@ -306,6 +307,43 @@ def test_find_prefix(kernel32_idb, version, bitness, expected):
         cursor = kernel32_idb.id0.find_prefix(b'does not exist')
 
 
+@kern32_test()
+def test_find_prefix2(kernel32_idb, version, bitness, expected):
+    '''
+    this test is derived from some issues encountered while doing import analysis.
+    ultimately, we're checking prefix matching when the first match is found
+     in a branch node.
+    '''
+    impnn = idb.netnode.Netnode(kernel32_idb, '$ imports')
+
+    expected_alts = list(range(0x30))
+    expected_alts.append(kernel32_idb.uint(-1))
+    assert list(impnn.alts()) == expected_alts
+    assert list(impnn.sups()) == list(range(0x30))
+
+    # capture the number of supvals in each netnode referenced from the import netnode
+    dist = []
+    for alt in impnn.alts():
+        if alt == kernel32_idb.uint(-1):
+            break
+
+        ref = idb.netnode.as_uint(impnn.get_val(alt, tag='A'))
+        nn = idb.netnode.Netnode(kernel32_idb, ref)
+        dist.append((alt, len(list(nn.sups()))))
+
+    # this distribution was collected empirically.
+    # the import analysis is correct (verified in IDA), so by extension, this should be correct as well.
+    assert dist == [
+        (0, 4), (1, 388), (2, 77), (3, 50), (4, 42), (5, 13), (6, 28), (7, 4),
+        (8, 33), (9, 68), (10, 1), (11, 9), (12, 1), (13, 7), (14, 1),
+        (15, 24), (16, 9), (17, 6), (18, 26), (19, 9), (20, 54), (21, 24), (22, 8),
+        (23, 9), (24, 7), (25, 5), (26, 1), (27, 2), (28, 26), (29, 1),
+        (30, 18), (31, 5), (32, 3), (33, 2), (34, 3), (35, 6), (36, 11), (37, 11),
+        (38, 5), (39, 6), (40, 11), (41, 7), (42, 10), (43, 14), (44, 38),
+        (45, 16), (46, 6), (47, 7)
+    ]
+
+
 @kern32_test([(695, 32, None)])
 def test_cursor_easy_leaf(kernel32_idb, version, bitness, expected):
     # this is found on a leaf, second to last index.
@@ -439,6 +477,18 @@ def test_id1(kernel32_idb, version, bitness, expected):
     assert id1.get_segment(0x689dc000 - 1).bounds.start == 0x68901000
     assert id1.get_next_segment(0x68901000).bounds.start == 0x689DD000
     assert id1.get_flags(0x68901000) == 0x2590
+
+
+def test_id1_2(elf_idb):
+    assert list(map(lambda s: s.offset, elf_idb.id1.segments)) == [
+        0x0,
+        0x8c,
+        0x1cec,
+        0x47e4c,
+        0x7382c,
+        0x7385c,
+        0x73f9c,
+    ]
 
 
 @kern32_test([

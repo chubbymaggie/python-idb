@@ -75,25 +75,6 @@ def test_loader(kernel32_idb, version, bitness, expected):
     assert loader.plugin == expected
 
 
-@kern32_test()
-def test_entrypoints(kernel32_idb, version, bitness, expected):
-    entrypoints = idb.analysis.EntryPoints(kernel32_idb)
-
-    addresses = entrypoints.addresses
-    assert len(addresses) == 1
-    assert 0x68901695 in addresses
-    assert addresses[0x68901695] == 'DllEntryPoint'
-
-    ordinals = entrypoints.ordinals
-    assert len(ordinals) == 0x623
-    assert 0x1 in ordinals
-
-    assert ordinals[0x1] == 'BaseThreadInitThunk'
-
-    allofthem = entrypoints.all
-    assert len(allofthem) == 0x624
-
-
 @kern32_test([
     (695, 32, 0x75),
     (695, 64, 0x75),
@@ -219,7 +200,7 @@ def test_function(kernel32_idb, version, bitness, expected):
     DllEntryPoint = idb.analysis.Function(kernel32_idb, 0x68901695)
 
     sig = DllEntryPoint.get_signature()
-    assert sig.calling_convention == 'stdcall'
+    assert sig.calling_convention == '__stdcall'
     assert sig.rtype == 'BOOL'
     assert len(sig.parameters) == 3
     assert list(map(lambda p: p.type, sig.parameters)) == [
@@ -333,3 +314,271 @@ def test_segstrings(kernel32_idb, version, bitness, expected):
 
     # the first string is some binary data.
     assert strs[1:] == ['.text', 'CODE', '.data', 'DATA', '.idata']
+
+def test_segments2(elf_idb):
+    EXPECTED = {
+        '.init': {
+            'startEA': 0x80496ac,
+            'sclass': 0x2,
+            'orgbase': 0x0,
+            'align': 0x5,
+            'comb': 0x2,
+            'perm': 0x5,
+            'bitness': 0x1,
+            'flags': 0x10,
+            'sel': 0x1,
+            'type': 0x2,
+            'color': 0xffffffff,
+        },
+        '.plt': {
+            'startEA': 0x80496d0,
+            'sclass': 0x2,
+            'orgbase': 0x0,
+            'align': 0x3,
+            'comb': 0x2,
+            'perm': 0x5,
+            'bitness': 0x1,
+            'flags': 0x10,
+            'sel': 0x2,
+            'type': 0x2,
+            'color': 0xffffffff,
+        },
+        '.plt.got': {
+            'startEA': 0x8049de0,
+            'sclass': 0x2,
+            'orgbase': 0x0,
+            'align': 0xa,
+            'comb': 0x2,
+            'perm': 0x5,
+            'bitness': 0x1,
+            'flags': 0x10,
+            'sel': 0x3,
+            'type': 0x2,
+            'color': 0xffffffff,
+        },
+        '.text': {
+            'startEA': 0x8049df0,
+            'sclass': 0x2,
+            'orgbase': 0x0,
+            'align': 0x3,
+            'comb': 0x2,
+            'perm': 0x5,
+            'bitness': 0x1,
+            'flags': 0x10,
+            'sel': 0x4,
+            'type': 0x2,
+            'color': 0xffffffff,
+        },
+        '.fini': {
+            'startEA': 0x805b634,
+            'sclass': 0x2,
+            'orgbase': 0x0,
+            'align': 0x5,
+            'comb': 0x2,
+            'perm': 0x5,
+            'bitness': 0x1,
+            'flags': 0x10,
+            'sel': 0x5,
+            'type': 0x2,
+            'color': 0xffffffff,
+        },
+        '.rodata': {
+            'startEA': 0x805b660,
+            'sclass': 0x8,
+            'orgbase': 0x0,
+            'align': 0x8,
+            'comb': 0x2,
+            'perm': 0x4,
+            'bitness': 0x1,
+            'flags': 0x10,
+            'sel': 0x6,
+            'type': 0x3,
+            'color': 0xffffffff,
+        },
+        '.eh_frame_hdr': {
+            'startEA': 0x8060c14,
+            'sclass': 0x8,
+            'orgbase': 0x0,
+            'align': 0x5,
+            'comb': 0x2,
+            'perm': 0x4,
+            'bitness': 0x1,
+            'flags': 0x10,
+            'sel': 0x7,
+            'type': 0x3,
+            'color': 0xffffffff,
+        },
+        '.eh_frame': {
+            'startEA': 0x8061430,
+            'sclass': 0x8,
+            'orgbase': 0x0,
+            'align': 0x5,
+            'comb': 0x2,
+            'perm': 0x4,
+            'bitness': 0x1,
+            'flags': 0x10,
+            'sel': 0x8,
+            'type': 0x3,
+            'color': 0xffffffff,
+        },
+        '.init_array': {
+            'startEA': 0x8067f00,
+            'sclass': 0xc,
+            'orgbase': 0x0,
+            'align': 0x5,
+            'comb': 0x2,
+            'perm': 0x6,
+            'bitness': 0x1,
+            'flags': 0x10,
+            'sel': 0x9,
+            'type': 0x3,
+            'color': 0xffffffff,
+        },
+        '.fini_array': {
+            'startEA': 0x8067f04,
+            'sclass': 0xc,
+            'orgbase': 0x0,
+            'align': 0x5,
+            'comb': 0x2,
+            'perm': 0x6,
+            'bitness': 0x1,
+            'flags': 0x10,
+            'sel': 0xa,
+            'type': 0x3,
+            'color': 0xffffffff,
+        },
+        '.jcr': {
+            'startEA': 0x8067f08,
+            'sclass': 0xc,
+            'orgbase': 0x0,
+            'align': 0x5,
+            'comb': 0x2,
+            'perm': 0x6,
+            'bitness': 0x1,
+            'flags': 0x10,
+            'sel': 0xb,
+            'type': 0x3,
+            'color': 0xffffffff,
+        },
+        '.got': {
+            'startEA': 0x8067ffc,
+            'sclass': 0xc,
+            'orgbase': 0x0,
+            'align': 0x5,
+            'comb': 0x2,
+            'perm': 0x6,
+            'bitness': 0x1,
+            'flags': 0x10,
+            'sel': 0xc,
+            'type': 0x3,
+            'color': 0xffffffff,
+        },
+        '.got.plt': {
+            'startEA': 0x8068000,
+            'sclass': 0xc,
+            'orgbase': 0x0,
+            'align': 0x5,
+            'comb': 0x2,
+            'perm': 0x6,
+            'bitness': 0x1,
+            'flags': 0x10,
+            'sel': 0xd,
+            'type': 0x3,
+            'color': 0xffffffff,
+        },
+        '.data': {
+            'startEA': 0x80681e0,
+            'sclass': 0xc,
+            'orgbase': 0x0,
+            'align': 0x8,
+            'comb': 0x2,
+            'perm': 0x6,
+            'bitness': 0x1,
+            'flags': 0x10,
+            'sel': 0xe,
+            'type': 0x3,
+            'color': 0xffffffff,
+        },
+        '.bss': {
+            'startEA': 0x8068380,
+            'sclass': 0x13,
+            'orgbase': 0x0,
+            'align': 0x9,
+            'comb': 0x2,
+            'perm': 0x6,
+            'bitness': 0x1,
+            'flags': 0x10,
+            'sel': 0xf,
+            'type': 0x9,
+            'color': 0xffffffff,
+        },
+        'extern': {
+            'startEA': 0x8068fb8,
+            'sclass': 0x0,
+            'orgbase': 0x0,
+            'align': 0x3,
+            'comb': 0x2,
+            'perm': 0x0,
+            'bitness': 0x1,
+            'flags': 0x10,
+            'sel': 0x10,
+            'type': 0x1,
+            'color': 0xffffffff,
+        },
+    }
+
+    segs = idb.analysis.Segments(elf_idb).segments
+    strs = idb.analysis.SegStrings(elf_idb).strings
+
+    for seg in segs.values():
+        segname = strs[seg.name_index]
+        expected_seg = EXPECTED[segname]
+        for k, v in expected_seg.items():
+            assert v == getattr(seg, k)
+
+
+@kern32_test()
+def test_imports(kernel32_idb, version, bitness, expected):
+    imports = list(idb.analysis.enumerate_imports(kernel32_idb))
+    assert len(imports) == 1116
+    assert ('api-ms-win-core-rtlsupport-l1-2-0',
+            'RtlCaptureContext',
+            0x689dd000) in imports
+
+    libs = set([])
+    for imp in imports:
+        libs.add(imp.library)
+
+    assert 'KERNELBASE' in libs
+    assert 'ntdll' in libs
+
+
+@kern32_test()
+def test_entrypoints2(kernel32_idb, version, bitness, expected):
+    entrypoints = list(idb.analysis.enumerate_entrypoints(kernel32_idb))
+
+    assert len(entrypoints) == 1572
+    assert entrypoints[0] == ('BaseThreadInitThunk', 0x6890172d, 1, None)
+    assert entrypoints[-100] == ('WaitForThreadpoolWorkCallbacks', 0x689dab51, 1473, 'NTDLL.TpWaitForWork')
+    assert entrypoints[-1] == ('DllEntryPoint', 0x68901696, None, None)
+
+
+@kern32_test()
+def test_idainfo(kernel32_idb, version, bitness, expected):
+    idainfo = idb.analysis.Root(kernel32_idb).idainfo
+
+    if version == 695:
+        assert idainfo.tag == 'IDA'
+    elif version == 700:
+        assert idainfo.tag == 'ida'
+    assert idainfo.version == version
+    assert idainfo.procname == 'metapc'
+
+    # this was a 6.95 file upgraded to 7.0b
+    cd = os.path.dirname(__file__)
+    idbpath = os.path.join(cd, 'data', 'multibitness', 'multibitness.idb')
+    with idb.from_file(idbpath) as db:
+        idainfo = idb.analysis.Root(db).idainfo
+        assert idainfo.tag == 'IDA'    # like from 6.95
+        assert idainfo.version == 700  # like from 7.00
+        assert idainfo.procname == 'metapc'  # actually stored as `| 0x06 m e t a p c |`

@@ -1,3 +1,4 @@
+import os
 import pytest
 
 import idb
@@ -69,6 +70,17 @@ def test_bytes(kernel32_idb, version, bitness, expected):
     assert idc.ItemSize(0x68901012) == 1
 
     assert idc.GetManyBytes(0x68901010, 0x3) == b'\x8B\xFF\x55'
+
+
+def test_bytes_2(elf_idb):
+    '''
+    Demonstrate issue reported as #12.
+    Thanks to @binoopang.
+
+    This exercises fetching of flags/bytes from a segment that is not the first.
+    '''
+    api = idb.IDAPython(elf_idb)
+    assert api.idc.GetManyBytes(0x8049df0, 0x10) == b'\x8D\x4C\x24\x04\x83\xE4\xF0\xFF\x71\xFC\x55\x89\xE5\x57\x56\x53'
 
 
 @kern32_test()
@@ -543,12 +555,10 @@ def test_comments(kernel32_idb, version, bitness, expected):
     assert api.ida_bytes.get_cmt(0x689023b4, True) == 'jumptable 6892FF97 default case'
 
     assert api.idc.Comment(0x6890103c) == 'Flags'
-    with pytest.raises(KeyError):
-        _ = api.idc.RptCmt(0x6890103c)
+    assert api.idc.RptCmt(0x6890103c) == ''
 
     assert api.idc.RptCmt(0x689023b4) == 'jumptable 6892FF97 default case'
-    with pytest.raises(KeyError):
-        _ = api.idc.Comment(0x689023b4)
+    assert api.idc.Comment(0x689023b4) == ''
 
     assert api.idc.GetCommentEx(0x6890103c, False) == 'Flags'
     assert api.idc.GetCommentEx(0x689023b4, True) == 'jumptable 6892FF97 default case'
@@ -573,18 +583,117 @@ def test_all_comments(kernel32_idb, version, bitness, expected):
         if not api.ida_bytes.has_cmt(flags):
             continue
 
-        try:
-            regcmt = api.ida_bytes.get_cmt(ea, False)
-        except KeyError:
-            regcmt = ''
-        else:
-            regcmts.append(regcmt)
-
-        try:
-            repcmt = api.ida_bytes.get_cmt(ea, True)
-        except KeyError:
-            repcmt = ''
-        else:
-            repcmts.append(repcmt)
+        regcmts.append(api.ida_bytes.get_cmt(ea, False))
+        repcmts.append(api.ida_bytes.get_cmt(ea, True))
 
     assert len(regcmts), len(repcmnts) == expected
+
+
+@kern32_test()
+def test_LocByName(kernel32_idb, version, bitness, expected):
+    api = idb.IDAPython(kernel32_idb)
+
+    assert api.idc.LocByName('CancelIo') == 0x6892e70a
+    assert api.idc.GetFunctionName(api.idc.LocByName('CancelIo')) == 'CancelIo'
+
+    assert api.idc.LocByName('__does not exist__') == -1
+
+
+@kern32_test()
+def test_MinMaxEA(kernel32_idb, version, bitness, expected):
+    api = idb.IDAPython(kernel32_idb)
+
+    assert api.idc.MinEA() == 0x68901000
+    assert api.idc.MaxEA() == 0x689de230
+
+
+@kern32_test()
+def test_CodeRefsTo(kernel32_idb, version, bitness, expected):
+    api = idb.IDAPython(kernel32_idb)
+
+    # this is the start of a function.
+    # calls are not code refs.
+    assert set(api.idautils.CodeRefsTo(0x689AD974, True)) == set([])
+
+    # this is the start of a basic block with one incoming edge, from a taken conditional jump.
+    assert set(api.idautils.CodeRefsTo(0x68901031, True)) == set([0x6890102b])
+
+    # this is an instruction at the middle of a basic block.
+    assert set(api.idautils.CodeRefsTo(0x68901012, True)) == set([0x68901010])
+    assert set(api.idautils.CodeRefsTo(0x68901012, False)) == set([])
+
+
+@kern32_test()
+def test_CodeRefsFrom(kernel32_idb, version, bitness, expected):
+    api = idb.IDAPython(kernel32_idb)
+
+    # this is an instruction at the middle of a basic block.
+    assert set(api.idautils.CodeRefsFrom(0x68901010, True)) == set([0x68901012])
+    assert set(api.idautils.CodeRefsFrom(0x68901010, False)) == set([])
+
+    # this is the end of a function.
+    assert set(api.idautils.CodeRefsFrom(0x689011B2, True)) == set([])
+
+    # this is a conditional jump.
+    assert set(api.idautils.CodeRefsFrom(0x6890102B, True)) == set([0x6890113B, 0x68901031])
+    assert set(api.idautils.CodeRefsFrom(0x6890102B, False)) == set([0x6890113B])
+
+
+@kern32_test()
+def test_imports(kernel32_idb, version, bitness, expected):
+    api = idb.IDAPython(kernel32_idb)
+    assert api.ida_nalt.get_import_module_qty() == 47
+    assert api.ida_nalt.get_import_module_name(0) == 'api-ms-win-core-rtlsupport-l1-2-0'
+    assert api.ida_nalt.get_import_module_name(1) == 'ntdll'
+
+    names = []
+    def cb(addr, name, ordinal):
+        names.append((addr, name, ordinal))
+        return True
+
+    api.ida_nalt.enum_import_names(1, cb)
+    assert len(names) == 388
+    assert names[0] == (0x689dd014, 'NtMapUserPhysicalPagesScatter', None)
+
+
+@kern32_test()
+def test_exports(kernel32_idb, version, bitness, expected):
+    api = idb.IDAPython(kernel32_idb)
+    assert api.ida_entry.get_entry_qty() == 1572
+    assert api.ida_entry.get_entry_ordinal(0x0) == 1
+    assert api.ida_entry.get_entry(api.ida_entry.get_entry_ordinal(0x0)) == 0x6890172d
+    assert api.ida_entry.get_entry_name(api.ida_entry.get_entry_ordinal(0x0)) == 'BaseThreadInitThunk'
+    assert api.ida_entry.get_entry_forwarder(api.ida_entry.get_entry_ordinal(0x10)) is None
+
+    assert api.ida_entry.get_entry_ordinal(1572) == 0x68901695
+    assert api.ida_entry.get_entry_name(0x68901695) == 'DllEntryPoint'
+
+
+@kern32_test()
+def test_GetType(kernel32_idb, version, bitness, expected):
+    api = idb.IDAPython(kernel32_idb)
+    assert api.idc.GetType(0x68901695) == 'BOOL __stdcall DllEntryPoint(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved)'
+
+    # valid function, but no type data associated...
+
+    #     .text:6899AE01                         ; Attributes: bp-based frame
+    #     .text:6899AE01
+    #     .text:6899AE01                         sub_6899AE01 proc near
+    assert api.idc.GetType(0x6899AE01) == None
+
+
+@kern32_test()
+def test_inf_structure(kernel32_idb, version, bitness, expected):
+    api = idb.IDAPython(kernel32_idb)
+    inf_structure = api.idaapi.get_inf_structure()
+    assert inf_structure.procname == 'metapc'
+
+
+def test_multi_bitness():
+    cd = os.path.dirname(__file__)
+    idbpath = os.path.join(cd, 'data', 'multibitness', 'multibitness.idb')
+
+    with idb.from_file(idbpath) as db:
+        api = idb.IDAPython(db)
+        assert api.idc.GetDisasm(0x0)    == 'xor\tdx, dx'    # 16-bit
+        assert api.idc.GetDisasm(0x1000) == 'xor\tedx, edx'  # 32-bit

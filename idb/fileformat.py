@@ -223,8 +223,9 @@ class Page(vstruct.VStruct):
 
     '''
 
-    def __init__(self, page_size):
+    def __init__(self, page_size, page_number):
         vstruct.VStruct.__init__(self)
+        self.page_number = page_number
         self.ppointer = v_uint32()
         self.entry_count = v_uint16()
         self.contents = v_bytes(page_size)
@@ -284,7 +285,7 @@ class Page(vstruct.VStruct):
         #  the linear scan below is simpler to read, so we'll use that until it becomes an issue.
         if self.is_leaf():
             for i, entry in enumerate(self.get_entries()):
-                if key == entry.key:
+                if key == bytes(entry.key):
                     return i
         else:
             for i, entry in enumerate(self.get_entries()):
@@ -365,7 +366,7 @@ class ExactMatchStrategy(FindStrategy):
 
         entry = page.get_entry(entry_number)
 
-        if entry.key == key:
+        if bytes(entry.key) == key:
             cursor.entry = entry
             cursor.entry_number = entry_number
             return
@@ -373,10 +374,10 @@ class ExactMatchStrategy(FindStrategy):
             # no matches!
             raise KeyError(key)
         else:
-            if entry_number == 0:
-                next_page_number = page.ppointer
-            elif is_largest:
+            if is_largest:
                 next_page_number = page.get_entry(page.entry_count - 1).page
+            elif entry_number == 0:
+                next_page_number = page.ppointer
             else:
                 next_page_number = page.get_entry(entry_number - 1).page
             self._find(cursor, next_page_number, key)
@@ -407,6 +408,9 @@ class PrefixMatchStrategy(FindStrategy):
                 elif entry_key > key:
                     # as soon as we reach greater entries, we'll never match
                     break
+
+            # pop the final path entry, cause we know its not here
+            cursor.path = cursor.path[:-1]
             raise KeyError(key)
         else:  # is branch node
             next_page = page.ppointer
@@ -417,19 +421,26 @@ class PrefixMatchStrategy(FindStrategy):
                     cursor.entry_number = i
                     return
                 elif entry_key.startswith(key):
-                    # the sub-page pointed to by this entry contains larger entries.
-                    # so we need to look at the sub-page pointed to by the last
-                    # entry (or ppointer).
-                    return self._find(cursor, next_page, key)
+                    # this is obviously a good match; however,
+                    # there may have been an exact match in the sub-page just prior,
+                    # so we need to first check that first.
+                    try:
+                        return self._find(cursor, next_page, key)
+                    except KeyError:
+                        cursor.entry = entry
+                        cursor.entry_number = i
+                        return
                 elif entry_key > key:
-                    # as soon as we reach greater entries, we'll never match
-                    break
+                    # as soon as we reach greater entries, we'll never match.
+                    # so we need to check the sub-page just prior.
+                    return self._find(cursor, next_page, key)
                 else:
                     next_page = entry.page
 
-            # since we haven't found a matching entry, but we know our matches must be in the page,
+            # since we haven't found a matching entry, but we know our matches must be somewhere,
             # we need to search the final sub-page, which contains the greatest entries.
-            return self._find(cursor, next_page, key)
+            last_entry = page.get_entry(page.entry_count - 1)
+            return self._find(cursor, last_entry.page, key)
 
     def find(self, cursor, key):
         self._find(cursor, cursor.index.root_page, key)
@@ -753,7 +764,7 @@ class ID0(vstruct.VStruct):
             return page
 
         buf = self.get_page_buffer(page_number)
-        page = Page(self.page_size)
+        page = Page(self.page_size, page_number)
         page.vsParse(buf)
 
         self._page_cache[page_number] = page
@@ -862,16 +873,19 @@ class ID1(vstruct.VStruct):
     SegmentDescriptor = namedtuple('SegmentDescriptor', ['bounds', 'offset'])
 
     def pcb_segment_count(self):
-        # TODO: pass wordsize
         self['_segments'].vsAddElements(self.segment_count,
                                         functools.partial(
                                             SegmentBounds,
                                             self.wordsize))
+
+    def pcb__segments(self):
         offset = 0
         for i in range(self.segment_count):
             segment = self._segments[i]
-            offset += 4 * (segment.end - segment.start)
+            segment_byte_count = segment.end - segment.start
+            segment_length = 4 * segment_byte_count  # each flag entry is a uint32 on all platforms
             self.segments.append(ID1.SegmentDescriptor(segment, offset))
+            offset += segment_length
         offset = 0x14 + (self.segment_count * (2 * self.wordsize))
         padsize = ID1.PAGE_SIZE - offset
         self['padding'].vsSetLength(padsize)
@@ -1068,12 +1082,15 @@ class IDB(vstruct.VStruct):
 
         # updated once header is parsed.
         self.wordsize = 0
+        self.uint = ValueError
 
     def pcb_header(self):
         if self.header.signature == b'IDA1':
             self.wordsize = 4
+            self.uint = idb.netnode.uint32
         elif self.header.signature == b'IDA2':
             self.wordsize = 8
+            self.uint = idb.netnode.uint64
         else:
             raise RuntimeError('unexpected file signature: %s' % (self.header.signature))
 

@@ -4,6 +4,7 @@ import collections
 
 import six
 
+import idb.netnode
 import idb.analysis
 
 
@@ -355,11 +356,27 @@ class ida_netnode:
 
 
 class idc:
+
+    SEGPERM_EXEC   = 1  # Execute
+    SEGPERM_WRITE  = 2  # Write
+    SEGPERM_READ   = 4  # Read
+    SEGPERM_MAXVAL = 7  # (SEGPERM_EXEC + SEGPERM_WRITE + SEGPERM_READ)
+
+    SFL_COMORG   = 0x01  # IDP dependent field (IBM PC: if set, ORG directive is not commented out)
+    SFL_OBOK     = 0x02  # orgbase is present? (IDP dependent field)
+    SFL_HIDDEN   = 0x04  # is the segment hidden?
+    SFL_DEBUG    = 0x08  # is the segment created for the debugger?
+    SFL_LOADER   = 0x10  # is the segment created by the loader?
+    SFL_HIDETYPE = 0x20  # hide segment type (do not print it in the listing)
+
     def __init__(self, db, api):
         self.idb = db
         self.api = api
-        # this will be the capstone disassembler, lazily loaded.
-        self.dis = None
+        # these will be the capstone disassemblers, lazily loaded.
+        # map from bitness (numbers 16, 32, and 64) to capstone disassembler instance
+        self.bit_dis = None
+        # map from tuple (segment start, end address) to capstone disassembler instance
+        self.seg_dis = None
 
         # apparently this enum changes with bitness.
         # this is annoying.
@@ -376,23 +393,60 @@ class idc:
         # https://github.com/zachriggle/idapython/blob/37d2fd13b31fec8e6e53fbb9704fa3cd0cbd5b07/python/idc.py#L4149
         if self.idb.wordsize == 4:
             # function start address
-            self.FUNCATTR_START = 0
+            self.FUNCATTR_START   = 0
             # function end address
-            self.FUNCATTR_END = 4
+            self.FUNCATTR_END     = 4
             # function flags
-            self.FUNCATTR_FLAGS = 8
+            self.FUNCATTR_FLAGS   = 8
             # function frame id
-            self.FUNCATTR_FRAME = 10
+            self.FUNCATTR_FRAME   = 10
             # size of local variables
-            self.FUNCATTR_FRSIZE = 14
+            self.FUNCATTR_FRSIZE  = 14
             # size of saved registers area
-            self.FUNCATTR_FRREGS = 18
+            self.FUNCATTR_FRREGS  = 18
             # number of bytes purged from the stack
             self.FUNCATTR_ARGSIZE = 20
             # frame pointer delta
-            self.FUNCATTR_FPD = 24
+            self.FUNCATTR_FPD     = 24
             # function color code
-            self.FUNCATTR_COLOR = 28
+            self.FUNCATTR_COLOR   = 28
+
+            # starting address
+            self.SEGATTR_START   =  0
+            # ending address
+            self.SEGATTR_END     =  4
+            self.SEGATTR_ORGBASE = 16
+            # alignment
+            self.SEGATTR_ALIGN   = 20
+            # combination
+            self.SEGATTR_COMB    = 21
+            # permissions
+            self.SEGATTR_PERM    = 22
+            # bitness (0: 16, 1: 32, 2: 64 bit segment)
+            self.SEGATTR_BITNESS = 23
+            # segment flags
+            self.SEGATTR_FLAGS   = 24
+            # segment selector
+            self.SEGATTR_SEL     = 28
+            # default ES value
+            self.SEGATTR_ES      = 32
+            # default CS value
+            self.SEGATTR_CS      = 36
+            # default SS value
+            self.SEGATTR_SS      = 40
+            # default DS value
+            self.SEGATTR_DS      = 44
+            # default FS value
+            self.SEGATTR_FS      = 48
+            # default GS value
+            self.SEGATTR_GS      = 52
+            # segment type
+            self.SEGATTR_TYPE    = 96
+            # segment color
+            self.SEGATTR_COLOR   = 100
+
+            self.BADADDR = 0xFFFFFFFF
+
         elif self.idb.wordsize == 8:
             self.FUNCATTR_START   = 0
             self.FUNCATTR_END     = 8
@@ -405,23 +459,43 @@ class idc:
             self.FUNCATTR_COLOR   = 52
             self.FUNCATTR_OWNER   = 18
             self.FUNCATTR_REFQTY  = 26
+
+            self.SEGATTR_START   =  0
+            self.SEGATTR_END     =  8
+            self.SEGATTR_ORGBASE = 32
+            self.SEGATTR_ALIGN   = 40
+            self.SEGATTR_COMB    = 41
+            self.SEGATTR_PERM    = 42
+            self.SEGATTR_BITNESS = 43
+            self.SEGATTR_FLAGS   = 44
+            self.SEGATTR_SEL     = 48
+            self.SEGATTR_ES      = 56
+            self.SEGATTR_CS      = 64
+            self.SEGATTR_SS      = 72
+            self.SEGATTR_DS      = 80
+            self.SEGATTR_FS      = 88
+            self.SEGATTR_GS      = 96
+            self.SEGATTR_TYPE    = 184
+            self.SEGATTR_COLOR   = 188
+
+            self.BADADDR = 0xFFFFFFFFFFFFFFFF
         else:
             raise RuntimeError('unexpected wordsize')
 
     def ScreenEA(self):
         return self.api.ScreenEA
 
-    def SegStart(self, ea):
+    def _get_segment(self, ea):
         segs = idb.analysis.Segments(self.idb).segments
         for seg in segs.values():
             if seg.startEA <= ea < seg.endEA:
-                return seg.startEA
+                return seg
+
+    def SegStart(self, ea):
+        return self._get_segment(ea).startEA
 
     def SegEnd(self, ea):
-        segs = idb.analysis.Segments(self.idb).segments
-        for seg in segs.values():
-            if seg.startEA <= ea < seg.endEA:
-                return seg.endEA
+        return self._get_segment(ea).endEA
 
     def FirstSeg(self):
         segs = idb.analysis.Segments(self.idb).segments
@@ -434,14 +508,48 @@ class idc:
 
         for i, seg in enumerate(segs):
             if seg.startEA <= ea < seg.endEA:
-                return segs[i + 1].startEA
+                if i < len(segs) - 1:
+                    return segs[i + 1].startEA
+                else:
+                    return self.BADADDR
 
     def SegName(self, ea):
         segstrings = idb.analysis.SegStrings(self.idb).strings
-        segs = idb.analysis.Segments(self.idb).segments
-        for seg in segs.values():
-            if seg.startEA <= ea < seg.endEA:
-                return segstrings[seg.name_index]
+        return segstrings[self._get_segment(ea).name_index]
+
+    def GetSegmentAttr(self, ea, attr):
+        if attr == self.SEGATTR_START:
+            return self.SegStart(ea)
+        elif attr == self.SEGATTR_END:
+            return self.SegEnd(ea)
+        elif attr == self.SEGATTR_ORGBASE:
+            return self._get_segment(ea).orgbase
+        elif attr == self.SEGATTR_ALIGN:
+            return self._get_segment(ea).align
+        elif attr == self.SEGATTR_COMB:
+            return self._get_segment(ea).comb
+        elif attr == self.SEGATTR_PERM:
+            return self._get_segment(ea).perm
+        elif attr == self.SEGATTR_BITNESS:
+            return self._get_segment(ea).bitness
+        elif attr == self.SEGATTR_FLAGS:
+            return self._get_segment(ea).flags
+        elif attr == self.SEGATTR_TYPE:
+            return self._get_segment(ea).type
+        elif attr == self.SEGATTR_COLOR:
+            return self._get_segment(ea).color
+        else:
+            raise NotImplementedError('segment attribute %d not yet implemented' % (attr))
+
+    def MinEA(self):
+        segs = idb.analysis.Segments(self.idb).segments.values()
+        segs = list(sorted(segs, key=lambda s: s.startEA))
+        return segs[0].startEA
+
+    def MaxEA(self):
+        segs = idb.analysis.Segments(self.idb).segments.values()
+        segs = list(sorted(segs, key=lambda s: s.startEA))
+        return segs[-1].endEA
 
     def GetFlags(self, ea):
         return self.idb.id1.get_flags(ea)
@@ -498,35 +606,214 @@ class idc:
         if use_dbg:
             raise NotImplementedError()
 
+        # can only read from one segment at a time
         if self.SegStart(ea) != self.SegStart(ea + size):
-            raise IndexError((ea, ea + size))
+            # edge case: when reading exactly to the end of the segment.
+            if ea + size == self.SegEnd(ea):
+                pass
+            else:
+                raise IndexError((ea, ea + size))
 
         ret = []
-        for i in range(ea, ea + size):
-            ret.append(self.IdbByte(i))
+        try:
+            for i in range(ea, ea + size):
+                ret.append(self.IdbByte(i))
+        except KeyError:
+            # we have already verified that that the requested range falls within a Segment.
+            # however, the underlying ID1 section may be smaller than the Segment.
+            # so, we pad the Segment with NULL bytes.
+            # this is consistent with the IDAPython behavior.
+            # see github issue #29.
+            ret.extend([0x0 for _ in  range(size - len(ret))])
+
         if six.PY2:
             return ''.join(map(chr, ret))
         else:
             return bytes(ret)
 
     def _load_dis(self):
-        if self.dis is not None:
+        if self.seg_dis is not None:
             return
+        self.bit_dis = {}
+        self.seg_dis = {}
 
         import capstone
-        # WARNING:
-        # TODO: this is hardcoded to 32bit x86! where is the arch stored in the idb?
-        self.dis = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32)
-        # required to fetch operand values
-        self.dis.detail = True
+
+        PROC_CS_MAP = {
+            # this is probably the only platform that is thoroughly tested in python-idb.
+            # at least, today.
+            'metapc':   capstone.CS_ARCH_X86,    # - Disassemble all IBMPC opcodes
+
+            # the rest of these are probably pretty much untested.
+            '8086':     capstone.CS_ARCH_X86,    # - Intel 8086
+            '80286r':   capstone.CS_ARCH_X86,    # - Intel 80286 real mode
+            '80286p':   capstone.CS_ARCH_X86,    # - Intel 80286 protected mode
+            '80386r':   capstone.CS_ARCH_X86,    # - Intel 80386 real mode
+            '80386p':   capstone.CS_ARCH_X86,    # - Intel 80386 protected mode
+            '80486r':   capstone.CS_ARCH_X86,    # - Intel 80486 real mode
+            '80486p':   capstone.CS_ARCH_X86,    # - Intel 80486 protected mode
+            '80586r':   capstone.CS_ARCH_X86,    # - Intel Pentium & MMX real mode
+            '80586p':   capstone.CS_ARCH_X86,    # - Intel Pentium & MMX prot mode
+            '80686p':   capstone.CS_ARCH_X86,    # - Intel Pentium Pro & MMX
+            'k62':      capstone.CS_ARCH_X86,    # - AMD K6-2 with 3DNow!
+            'p2':       capstone.CS_ARCH_X86,    # - Intel Pentium II
+            'p3':       capstone.CS_ARCH_X86,    # - Intel Pentium III
+            'athlon':   capstone.CS_ARCH_X86,    # - AMD K7
+            'p4':       capstone.CS_ARCH_X86,    # - Intel Pentium 4
+            '8085':     capstone.CS_ARCH_X86,    # - Intel 8085
+            'ppc':      capstone.CS_ARCH_PPC,    # - PowerPC big endian
+            'ppcl':     capstone.CS_ARCH_PPC,    # - PowerPC little endian
+            'arm':      capstone.CS_ARCH_ARM,    # - ARM little endian
+            'armb':     capstone.CS_ARCH_ARM,    # - ARM big endian
+            'mipsl':    capstone.CS_ARCH_MIPS,   # - MIPS little endian
+            'mipsb':    capstone.CS_ARCH_MIPS,   # - MIPS big endian
+            'mipsrl':   capstone.CS_ARCH_MIPS,   # - MIPS & RSP little
+            'mipsr':    capstone.CS_ARCH_MIPS,   # - MIPS & RSP big
+            'r5900l':   capstone.CS_ARCH_MIPS,   # - MIPS R5900 little
+            'r5900r':   capstone.CS_ARCH_MIPS,   # - MIPS R5900 big
+            'sparcb':   capstone.CS_ARCH_SPARC,  # - SPARC big endian
+            'sparcl':   capstone.CS_ARCH_SPARC,  # - SPARC little endian
+
+            # i don't think any of the rest of these are supported by capstone today
+            'z80':       None,  # - Zilog 80
+            'z180':      None,  # - Zilog 180
+            'z380':      None,  # - Zilog 380
+            '64180':     None,  # - Hitachi HD64180
+            'gb':        None,  # - Gameboy
+            'z8':        None,  # - Zilog 8
+            '860xr':     None,  # - Intel 860 XR
+            '860xp':     None,  # - Intel 860 XP
+            '8051':      None,  # - Intel 8051
+            '80196':     None,  # - Intel 80196
+            '80196NP':   None,  # - Intel 80196NP, NU
+            'm6502':     None,  # - MOS 6502
+            'm65c02':    None,  # - MOS 65c02
+            'pdp11':     None,  # - DEC PDP/11
+            '68000':     None,  # - Motorola MC68000
+            '68010':     None,  # - Motorola MC68010
+            '68020':     None,  # - Motorola MC68020
+            '68030':     None,  # - Motorola MC68030
+            '68040':     None,  # - Motorola MC68040
+            '68330':     None,  # - Motorola CPU32 (68330)
+            '68882':     None,  # - Motorola MC68020 with MC68882
+            '68851':     None,  # - Motorola MC68020 with MC68851
+            '68020EX':   None,  # - Motorola MC68020 with both
+            'colfire':   None,  # - Motorola ColdFire
+            '68K':       None,  # - Motorola MC680x0 all opcodes
+            '6800':      None,  # - Motorola MC68HC00
+            '6801':      None,  # - Motorola MC68HC01
+            '6803':      None,  # - Motorola MC68HC03
+            '6301':      None,  # - Hitachi HD 6301
+            '6303':      None,  # - Hitachi HD 6303
+            '6805':      None,  # - Motorola MC68HC05
+            '6808':      None,  # - Motorola MC68HC08
+            '6809':      None,  # - Motorola MC68HC09
+            '6811':      None,  # - Motorola MC68HC11
+            '6812':      None,  # - Motorola MC68HC12
+            'hcs12':     None,  # - Motorola MC68HCS12
+            '6816':      None,  # - Motorola MC68HC16
+            'java':      None,  # - java
+            'tms320c2':  None,  # - TMS320C2x series
+            'tms320c5':  None,  # - TMS320C5x series
+            'tms320c6':  None,  # - TMS320C6x series
+            'tms320c3':  None,  # - TMS320C3x series
+            'tms32054':  None,  # - TMS320C54xx series
+            'tms32055':  None,  # - TMS320C55xx series
+            'sh3':       None,  # - Renesas SH-3 (little endian)
+            'sh3b':      None,  # - Renesas SH-3 (big endian)
+            'sh4':       None,  # - Renesas SH-4 (little endian)
+            'sh4b':      None,  # - Renesas SH-4 (big endian)
+            'sh2a':      None,  # - Renesas SH-2A (big endian)
+            'avr':       None,  # - ATMEL AVR                      (ATMEL family)
+            'h8300':     None,  # - H8/300x in normal mode
+            'h8300a':    None,  # - H8/300x in advanced mode
+            'h8s300':    None,  # - H8S in normal mode
+            'h8s300a':   None,  # - H8S in advanced mode
+            'h8500':     None,  # - H8/500                         (Hitachi H8/500 family)
+            'pic12cxx':  None,  # - Microchip PIC 12-bit (12xxx)
+            'pic16cxx':  None,  # - Microchip PIC 14-bit (16xxx)
+            'pic18cxx':  None,  # - Microchip PIC 16-bit (18xxx)
+            'alphab':    None,  # - DEC Alpha big endian
+            'alphal':    None,  # - DEC Alpha little endian
+            'hppa':      None,  # - HP PA-RISC big endian
+            'dsp56k':    None,  # - Motorola DSP 5600x
+            'dsp561xx':  None,  # - Motorola DSP 561xx
+            'dsp563xx':  None,  # - Motorola DSP 563xx
+            'dsp566xx':  None,  # - Motorola DSP 566xx
+            'c166':      None,  # - Siemens C166
+            'c166v1':    None,  # - Siemens C166 v1 family
+            'c166v2':    None,  # - Siemens C166 v2 family
+            'st10':      None,  # - SGS-Thomson ST10
+            'super10':   None,  # - Super10
+            'st20':      None,  # - SGS-Thomson ST20/C1
+            'st20c4':    None,  # - SGS-Thomson ST20/C2-C4
+            'st7':       None,  # - SGS-Thomson ST7
+            'ia64l':     None,  # - Intel Itanium little endian
+            'ia64b':     None,  # - Intel Itanium big endian
+            'cli':       None,  # - Microsoft.Net platform
+            'net':       None,  # - Microsoft.Net platform (alias)
+            'i960l':     None,  # - Intel 960 little endian
+            'i960b':     None,  # - Intel 960 big endian
+            'f2mc16l':   None,  # - Fujitsu F2MC-16L
+            'f2mc16lx':  None,  # - Fujitsu F2MC-16LX
+            '78k0':      None,  # - NEC 78k/0
+            '78k0s':     None,  # - NEC 78k/0s
+            'm740':      None,  # - Mitsubishi 8-bit
+            'm7700':     None,  # - Mitsubishi 16-bit
+            'm7750':     None,  # - Mitsubishi 16-bit
+            'm32r':      None,  # - Mitsubishi 32-bit
+            'm32rx':     None,  # - Mitsubishi 32-bit extended
+            'st9':       None,  # - STMicroelectronics ST9+
+            'fr':        None,  # - Fujitsu FR family
+            'm7900':     None,  # - Mitsubishi M7900
+            'kr1878':    None,  # - Angstrem KR1878
+            'ad218x':    None,  # - Analog Devices ADSP
+            'oakdsp':    None,  # - Atmel OAK DSP
+            'tricore':   None,  # - Infineon Tricore
+            'ebc':       None,  # - EFI Bytecode
+            'msp430':    None,  # - Texas Instruments MSP430
+        }
+
+        procname = self.api.idaapi.get_inf_structure().procname
+        cs_arch = PROC_CS_MAP.get(procname)
+        if cs_arch is None:
+            raise NotImplementedError('disassembly not supported on arch: ' + procname)
+
+        for seg in idb.analysis.Segments(self.idb).segments.values():
+            seg_range = (seg.startEA, seg.endEA)
+            if seg.bitness == 0:
+                if 16 not in self.bit_dis:
+                    self.bit_dis[16] = capstone.Cs(cs_arch, capstone.CS_MODE_16)
+                    self.bit_dis[16].detail = True
+                self.seg_dis[seg_range] = self.bit_dis[16]
+            elif seg.bitness == 1:
+                if 32 not in self.bit_dis:
+                    self.bit_dis[32] = capstone.Cs(cs_arch, capstone.CS_MODE_32)
+                    self.bit_dis[32].detail = True
+                self.seg_dis[seg_range] = self.bit_dis[32]
+            elif seg.bitness == 2:
+                if 64 not in self.bit_dis:
+                    self.bit_dis[64] = capstone.Cs(cs_arch, capstone.CS_MODE_64)
+                    self.bit_dis[64].detail = True
+                self.seg_dis[seg_range] = self.bit_dis[64]
+            else:
+                raise NotImplementedError('unknown bitness: %d' % (seg.bitness))
 
     def _disassemble(self, ea):
         size = self.ItemSize(ea)
         buf = self.GetManyBytes(ea, size)
         self._load_dis()
 
+        dis = None
+        for (seg_start, seg_end), dis in self.seg_dis.items():
+            if seg_start <= ea < seg_end:
+                break
+
+        if dis is None:
+            raise ValueError('failed to find ea in valid segment: ' + hex(ea))
+
         try:
-            op = next(self.dis.disasm(buf, ea))
+            op = next(dis.disasm(buf, ea))
         except StopIteration:
             raise RuntimeError('failed to disassemble %s' % (hex(ea)))
         else:
@@ -535,6 +822,10 @@ class idc:
     def GetMnem(self, ea):
         op = self._disassemble(ea)
         return op.mnemonic
+
+    def GetDisasm(self, ea):
+        op = self._disassemble(ea)
+        return '%s\t%s' % (op.mnemonic, op.op_str)
 
     # one instruction or data
     CIC_ITEM = 1
@@ -618,6 +909,14 @@ class idc:
             else:
                 raise RuntimeError('unexpected wordsize')
 
+    def LocByName(self, name):
+        try:
+            key = ("N" + name).encode('utf-8')
+            cursor = self.idb.id0.find(key)
+            return idb.netnode.as_uint(cursor.value)
+        except KeyError:
+            return -1
+
     def GetInputMD5(self):
         return idb.analysis.Root(self.idb).md5
 
@@ -629,6 +928,30 @@ class idc:
 
     def GetCommentEx(self, ea, repeatable):
         return self.api.ida_bytes.get_cmt(ea, repeatable)
+
+    def GetType(self, ea):
+        try:
+            f = idb.analysis.Function(self.idb, ea)
+        except Exception as e:
+            logger.warning('failed to fetch function for GetType: %s', e)
+            return None
+
+        try:
+            name = f.get_name()
+            sig = f.get_signature()
+        except KeyError:
+            return None
+
+        params = []
+        for param in sig.parameters:
+            params.append('%s %s' % (param.type, param.name))
+
+        return '{rtype:s} {cc:s} {name:s}({params:s})'.format(
+            rtype=sig.rtype,
+            cc=sig.calling_convention,
+            name=name,
+            params=', '.join(params),
+        )
 
     @staticmethod
     def hasValue(flags):
@@ -739,13 +1062,16 @@ class ida_bytes:
     def get_cmt(self, ea, repeatable):
         flags = self.api.idc.GetFlags(ea)
         if not self.has_cmt(flags):
-            raise KeyError(ea)
+            return ''
 
-        nn = self.api.ida_netnode.netnode(ea)
-        if repeatable:
-            return nn.supstr(tag='S', index=1)
-        else:
-            return nn.supstr(tag='S', index=0)
+        try:
+            nn = self.api.ida_netnode.netnode(ea)
+            if repeatable:
+                return nn.supstr(tag='S', index=1)
+            else:
+                return nn.supstr(tag='S', index=0)
+        except KeyError:
+            return ''
 
     @staticmethod
     def isFunc(flags):
@@ -890,6 +1216,9 @@ class ida_bytes:
     def isCustom(flags):
         return flags & FLAGS.DT_TYPE == FLAGS.FF_CUSTOM
 
+    def get_bytes(self, ea, count):
+        return self.api.idc.GetManyBytes(ea, count)
+
 
 class ida_nalt:
     def __init__(self, db, api):
@@ -978,6 +1307,29 @@ class ida_nalt:
     def is_notcode(self, ea):
         return is_flag_set(self.get_aflags(ea), AFLAGS.AFL_NOTCODE)
 
+    def get_import_module_qty(self):
+        return max(idb.analysis.Imports(self.idb).lib_names.keys())
+
+    def get_import_module_name(self, mod_index):
+        return idb.analysis.Imports(self.idb).lib_names[mod_index]
+
+    def enum_import_names(self, mod_index, py_cb):
+        imps = idb.analysis.Imports(self.idb)
+
+        # dereference the node id stored in the A val
+        nnref = imps.lib_netnodes[mod_index]
+        nn = idb.netnode.Netnode(self.idb, nnref)
+
+        for funcaddr in nn.sups():
+            funcname = nn.supstr(funcaddr)
+            if not py_cb(funcaddr, funcname, None):
+                return
+    
+    def get_imagebase(self):
+        return idb.analysis.Root(self.idb).imagebase
+
+        # TODO: where to fetch ordinal?
+
 
 class ida_funcs:
     # via: https://www.hex-rays.com/products/ida/support/sdkdoc/group___f_u_n_c__.html
@@ -1055,6 +1407,33 @@ class ida_funcs:
                 return self.get_func(func.owner)
             else:
                 return func
+
+    def get_func_cmt(self, ea, repeatable):
+        # function comments are stored on the `$ funcs` netnode
+        # tag is either `R` or `C`.
+        # index is effective address of the function.
+        # for example::
+        #
+        #     nodeid: ff00000000000027 tag: C index: 0x401598
+        #     00000000: 72 65 70 20 63 6D 74 00                           rep cmt.
+        #     --
+        #     nodeid: ff00000000000027 tag: N index: None
+        #     00000000: 24 20 66 75 6E 63 73                              $ funcs
+        #     --
+        #     nodeid: ff00000000000027 tag: R index: 0x401598
+        #     00000000: 72 65 70 20 63 6D 74 00                           rep cmt.
+        #
+        # i think its a bug that when you set a repeatable function via the IDA UI,
+        # it also sets a local function comment.
+        nn = self.api.ida_netnode.netnode('$ funcs')
+        try:
+            if repeatable:
+                tag = 'R'
+            else:
+                tag = 'C'
+            return nn.supstr(tag=tag, index=ea)
+        except KeyError:
+            return ''
 
 
 class BasicBlock(object):
@@ -1347,6 +1726,15 @@ class idaapi:
             if seg.startEA <= ea < seg.endEA:
                 return seg
 
+    def get_segm_name(self, ea):
+        return self.api.idc.SegName(ea)
+
+    def get_segm_end(self, ea):
+        return self.api.idc.SegEnd(ea)
+
+    def get_inf_structure(self):
+        return idb.analysis.Root(self.idb).idainfo
+
 
 class idautils:
     def __init__(self, db, api):
@@ -1368,6 +1756,70 @@ class idautils:
             ret.append(func.startEA)
         return list(sorted(ret))
 
+    def CodeRefsTo(self, ea, flow):
+        if flow:
+            flags = self.api.idc.GetFlags(ea)
+            if self.api.ida_bytes.isFlow(flags):
+                # prev instruction fell through to this insn
+                yield self.api.idc.PrevHead(ea)
+
+        # get all the code xrefs to this instruction.
+        # a code xref is like a fallthrough or jump, not like a call.
+        for xref in idb.analysis.get_crefs_to(self.idb, ea,
+                                              types=[idaapi.fl_JN, idaapi.fl_JF, idaapi.fl_F]):
+            yield xref.src
+
+    def CodeRefsFrom(self, ea, flow):
+        if flow:
+            nextea = self.api.idc.NextHead(ea)
+            nextflags = self.api.idc.GetFlags(nextea)
+            if self.api.ida_bytes.isFlow(nextflags):
+                # instruction falls through to next insn
+                yield nextea
+
+        # get all the code xrefs from this instruction.
+        # a code xref is like a fallthrough or jump, not like a call.
+        for xref in idb.analysis.get_crefs_from(self.idb, ea,
+                                                types=[idaapi.fl_JN, idaapi.fl_JF, idaapi.fl_F]):
+            yield xref.dst
+
+
+class ida_entry:
+    def __init__(self, db, api):
+        self.idb = db
+        self.api = api
+
+    def get_entry_qty(self):
+        ents = idb.analysis.EntryPoints(self.idb)
+        return len(ents.functions) + len(ents.main_entry)
+
+    def get_entry_ordinal(self, index):
+        ents = idb.analysis.EntryPoints(self.idb)
+        try:
+            return ents.ordinals[index + 1]
+        except KeyError:
+            # once we enumerate all the exports by ordinal,
+            # then wrap into the "main entry".
+            # not sure that there can be more than one, but we attempt to deal here.
+            return sorted(ents.main_entry)[index - len(ents.functions) - 1]
+
+    def get_entry(self, ordinal):
+        # for the "main entry", ordinal is actually an address.
+        ents = idb.analysis.EntryPoints(self.idb)
+        return ents.functions[ordinal]
+
+    def get_entry_name(self, ordinal):
+        ents = idb.analysis.EntryPoints(self.idb)
+        try:
+            return ents.function_names[ordinal]
+        except KeyError:
+            # for the "main entry", ordinal is actually an address.
+            return ents.main_entry_name[ordinal]
+
+    def get_entry_forwarder(self, ordinal):
+        ents = idb.analysis.EntryPoints(self.idb)
+        return ents.forwarded_symbols.get(ordinal)
+
 
 class IDAPython:
     def __init__(self, db, ScreenEA=None):
@@ -1381,3 +1833,4 @@ class IDAPython:
         self.ida_bytes = ida_bytes(db, self)
         self.ida_netnode = ida_netnode(db, self)
         self.ida_nalt = ida_nalt(db, self)
+        self.ida_entry = ida_entry(db, self)

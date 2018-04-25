@@ -8,6 +8,38 @@ import six
 logger = logging.getLogger(__name__)
 
 
+def uint32(i):
+    '''
+    Convert the given signed number into its 32-bit little endian unsigned number value.
+
+    Example::
+
+        assert uint32(-1) == 0xFFFFFFFF
+
+
+    Example::
+
+        assert uint32(1) == 1
+    '''
+    return struct.unpack('>I', struct.pack('>i', i))[0]
+
+
+def uint64(i):
+    '''
+    Convert the given signed number into its 64-bit little endian unsigned number value.
+
+    Example::
+
+        assert uint64(-1) == 0xFFFFFFFFFFFFFFFF
+
+
+    Example::
+
+        assert uint64(1) == 1
+    '''
+    return struct.unpack('>Q', struct.pack('>q', i))[0]
+
+
 class TAGS:
     '''
     via: https://www.hex-rays.com/products/ida/support/sdkdoc/group__nn__res.html#gaedcc558fe55e19ebc6e304ba7ad8c4d6
@@ -59,8 +91,10 @@ def make_key(nodeid, tag=None, index=None, wordsize=4):
 
         if index is None:
             return b'.' + struct.pack('>' + wordformat + 'c', nodeid, tag)
-        else:
+        elif index < 0:
             return b'.' + struct.pack('>' + wordformat + 'c' + wordformat.lower(), nodeid, tag, index)
+        else:
+            return b'.' + struct.pack('>' + wordformat + 'c' + wordformat, nodeid, tag, index)
     else:
         raise ValueError('unexpected type of nodeid: ' + str(type(nodeid)))
 
@@ -84,9 +118,9 @@ def parse_key(buf, wordsize=4):
 
     nodeid, tag = struct.unpack_from('>' + wordformat + 'c', buf, 1)
     tag = tag.decode('ascii')
-    if len(buf) > TAG_LENGTH + wordsize + KEY_HEADER_LENGTH:
+    if len(buf) >= TAG_LENGTH + 2 * wordsize + KEY_HEADER_LENGTH:
         offset = TAG_LENGTH + KEY_HEADER_LENGTH + wordsize
-        index = struct.unpack_from('>' + wordformat.lower(), buf, offset)[0]
+        index = struct.unpack_from('>' + wordformat, buf, offset)[0]
     else:
         index = None
 
