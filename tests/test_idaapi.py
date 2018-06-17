@@ -59,10 +59,9 @@ def test_bytes(kernel32_idb, version, bitness, expected):
     byte = idc.IdbByte(0x68901010)
     assert byte == 0x8B
 
-    with pytest.raises(KeyError):
-        # this effective address does not exist
-        idc.GetFlags(0x88888888)
-        assert idc.hasValue(idc.GetFlags(0x88888888)) is True
+    # this effective address does not exist
+    assert not idc.GetFlags(0x88888888) # FIXME:our idc.GetFlags return None, but it should return 0 when running in ida.
+    # assert idc.hasValue(idc.GetFlags(0x88888888)) is False
 
     assert idc.ItemSize(0x68901010) == 2
     with pytest.raises(ValueError):
@@ -697,3 +696,43 @@ def test_multi_bitness():
         api = idb.IDAPython(db)
         assert api.idc.GetDisasm(0x0)    == 'xor\tdx, dx'    # 16-bit
         assert api.idc.GetDisasm(0x1000) == 'xor\tedx, edx'  # 32-bit
+
+
+@kern32_test()
+def test_name(kernel32_idb, version, bitness, expected):
+    api = idb.IDAPython(kernel32_idb)
+    assert api.ida_bytes.has_name(api.ida_bytes.get_flags(0x689DB190)) == True
+    assert api.ida_name.get_name(0x689DB190) == 'FinestResolution'
+
+
+def test_anterior_lines():
+    cd = os.path.dirname(__file__)
+    idbpath = os.path.join(cd, 'data', 'ant-post-comments', 'small.idb')
+
+    with idb.from_file(idbpath) as db:
+        api = idb.IDAPython(db)
+        assert api.idc.LineA(1, 0) == 'anterior line 1'
+        assert api.idc.LineA(1, 1) == 'anterior line 2'
+        assert api.idc.LineA(1, 2) == ''
+
+
+def test_posterior_lines():
+    cd = os.path.dirname(__file__)
+    idbpath = os.path.join(cd, 'data', 'ant-post-comments', 'small.idb')
+
+    with idb.from_file(idbpath) as db:
+        api = idb.IDAPython(db)
+        assert api.idc.LineB(1, 0) == 'posterior line 1'
+        assert api.idc.LineB(1, 1) == 'posterior line 2'
+        assert api.idc.LineB(1, 2) == ''
+
+
+def test_function_comment():
+    cd = os.path.dirname(__file__)
+    idbpath = os.path.join(cd, 'data', 'func-comment', 'small.idb')
+
+    with idb.from_file(idbpath) as db:
+        api = idb.IDAPython(db)
+        assert api.ida_funcs.get_func_cmt(3, False) == 'function comment'
+        assert api.ida_funcs.get_func_cmt(3, True) == 'repeatable function comment'
+

@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
+import re
 import logging
+import weakref
+import functools
 import collections
 
 import six
@@ -9,6 +12,25 @@ import idb.analysis
 
 
 logger = logging.getLogger(__name__)
+
+
+
+# via: https://stackoverflow.com/a/33672499/87207
+def memoized_method(*lru_args, **lru_kwargs):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapped_func(self, *args, **kwargs):
+            # We're storing the wrapped method inside the instance. If we had
+            # a strong reference to self the instance would never die.
+            self_weak = weakref.ref(self)
+            @functools.wraps(func)
+            @functools.lru_cache(*lru_args, **lru_kwargs)
+            def cached_method(*args, **kwargs):
+                return func(self_weak(), *args, **kwargs)
+            setattr(self, func.__name__, cached_method)
+            return cached_method(*args, **kwargs)
+        return wrapped_func
+    return decorator
 
 
 def is_flag_set(flags, flag):
@@ -552,7 +574,10 @@ class idc:
         return segs[-1].endEA
 
     def GetFlags(self, ea):
-        return self.idb.id1.get_flags(ea)
+        try:
+            return self.idb.id1.get_flags(ea)
+        except KeyError:
+            return 0
 
     def IdbByte(self, ea):
         flags = self.GetFlags(ea)
@@ -577,7 +602,7 @@ class idc:
 
         ea += 1
         flags = self.GetFlags(ea)
-        while not self.api.ida_bytes.isHead(flags):
+        while flags is not None and not self.api.ida_bytes.isHead(flags):
             ea += 1
             # TODO: handle Index/KeyError here when we overrun a segment
             flags = self.GetFlags(ea)
@@ -586,7 +611,7 @@ class idc:
     def NextHead(self, ea):
         ea += 1
         flags = self.GetFlags(ea)
-        while not self.api.ida_bytes.isHead(flags):
+        while flags is not None and not self.api.ida_bytes.isHead(flags):
             ea += 1
             # TODO: handle Index/KeyError here when we overrun a segment
             flags = self.GetFlags(ea)
@@ -631,189 +656,57 @@ class idc:
         else:
             return bytes(ret)
 
-    def _load_dis(self):
-        if self.seg_dis is not None:
-            return
-        self.bit_dis = {}
-        self.seg_dis = {}
-
+    def _load_dis(self, arch, mode):
         import capstone
+        if self.bit_dis is None:
+            self.bit_dis = {}
+        if self.bit_dis.get((arch, mode)) is None:
+            r = capstone.Cs(arch, mode)
+            self.bit_dis[(arch, mode)] = r
+        return self.bit_dis[(arch, mode)]
 
-        PROC_CS_MAP = {
-            # this is probably the only platform that is thoroughly tested in python-idb.
-            # at least, today.
-            'metapc':   capstone.CS_ARCH_X86,    # - Disassemble all IBMPC opcodes
-
-            # the rest of these are probably pretty much untested.
-            '8086':     capstone.CS_ARCH_X86,    # - Intel 8086
-            '80286r':   capstone.CS_ARCH_X86,    # - Intel 80286 real mode
-            '80286p':   capstone.CS_ARCH_X86,    # - Intel 80286 protected mode
-            '80386r':   capstone.CS_ARCH_X86,    # - Intel 80386 real mode
-            '80386p':   capstone.CS_ARCH_X86,    # - Intel 80386 protected mode
-            '80486r':   capstone.CS_ARCH_X86,    # - Intel 80486 real mode
-            '80486p':   capstone.CS_ARCH_X86,    # - Intel 80486 protected mode
-            '80586r':   capstone.CS_ARCH_X86,    # - Intel Pentium & MMX real mode
-            '80586p':   capstone.CS_ARCH_X86,    # - Intel Pentium & MMX prot mode
-            '80686p':   capstone.CS_ARCH_X86,    # - Intel Pentium Pro & MMX
-            'k62':      capstone.CS_ARCH_X86,    # - AMD K6-2 with 3DNow!
-            'p2':       capstone.CS_ARCH_X86,    # - Intel Pentium II
-            'p3':       capstone.CS_ARCH_X86,    # - Intel Pentium III
-            'athlon':   capstone.CS_ARCH_X86,    # - AMD K7
-            'p4':       capstone.CS_ARCH_X86,    # - Intel Pentium 4
-            '8085':     capstone.CS_ARCH_X86,    # - Intel 8085
-            'ppc':      capstone.CS_ARCH_PPC,    # - PowerPC big endian
-            'ppcl':     capstone.CS_ARCH_PPC,    # - PowerPC little endian
-            'arm':      capstone.CS_ARCH_ARM,    # - ARM little endian
-            'armb':     capstone.CS_ARCH_ARM,    # - ARM big endian
-            'mipsl':    capstone.CS_ARCH_MIPS,   # - MIPS little endian
-            'mipsb':    capstone.CS_ARCH_MIPS,   # - MIPS big endian
-            'mipsrl':   capstone.CS_ARCH_MIPS,   # - MIPS & RSP little
-            'mipsr':    capstone.CS_ARCH_MIPS,   # - MIPS & RSP big
-            'r5900l':   capstone.CS_ARCH_MIPS,   # - MIPS R5900 little
-            'r5900r':   capstone.CS_ARCH_MIPS,   # - MIPS R5900 big
-            'sparcb':   capstone.CS_ARCH_SPARC,  # - SPARC big endian
-            'sparcl':   capstone.CS_ARCH_SPARC,  # - SPARC little endian
-
-            # i don't think any of the rest of these are supported by capstone today
-            'z80':       None,  # - Zilog 80
-            'z180':      None,  # - Zilog 180
-            'z380':      None,  # - Zilog 380
-            '64180':     None,  # - Hitachi HD64180
-            'gb':        None,  # - Gameboy
-            'z8':        None,  # - Zilog 8
-            '860xr':     None,  # - Intel 860 XR
-            '860xp':     None,  # - Intel 860 XP
-            '8051':      None,  # - Intel 8051
-            '80196':     None,  # - Intel 80196
-            '80196NP':   None,  # - Intel 80196NP, NU
-            'm6502':     None,  # - MOS 6502
-            'm65c02':    None,  # - MOS 65c02
-            'pdp11':     None,  # - DEC PDP/11
-            '68000':     None,  # - Motorola MC68000
-            '68010':     None,  # - Motorola MC68010
-            '68020':     None,  # - Motorola MC68020
-            '68030':     None,  # - Motorola MC68030
-            '68040':     None,  # - Motorola MC68040
-            '68330':     None,  # - Motorola CPU32 (68330)
-            '68882':     None,  # - Motorola MC68020 with MC68882
-            '68851':     None,  # - Motorola MC68020 with MC68851
-            '68020EX':   None,  # - Motorola MC68020 with both
-            'colfire':   None,  # - Motorola ColdFire
-            '68K':       None,  # - Motorola MC680x0 all opcodes
-            '6800':      None,  # - Motorola MC68HC00
-            '6801':      None,  # - Motorola MC68HC01
-            '6803':      None,  # - Motorola MC68HC03
-            '6301':      None,  # - Hitachi HD 6301
-            '6303':      None,  # - Hitachi HD 6303
-            '6805':      None,  # - Motorola MC68HC05
-            '6808':      None,  # - Motorola MC68HC08
-            '6809':      None,  # - Motorola MC68HC09
-            '6811':      None,  # - Motorola MC68HC11
-            '6812':      None,  # - Motorola MC68HC12
-            'hcs12':     None,  # - Motorola MC68HCS12
-            '6816':      None,  # - Motorola MC68HC16
-            'java':      None,  # - java
-            'tms320c2':  None,  # - TMS320C2x series
-            'tms320c5':  None,  # - TMS320C5x series
-            'tms320c6':  None,  # - TMS320C6x series
-            'tms320c3':  None,  # - TMS320C3x series
-            'tms32054':  None,  # - TMS320C54xx series
-            'tms32055':  None,  # - TMS320C55xx series
-            'sh3':       None,  # - Renesas SH-3 (little endian)
-            'sh3b':      None,  # - Renesas SH-3 (big endian)
-            'sh4':       None,  # - Renesas SH-4 (little endian)
-            'sh4b':      None,  # - Renesas SH-4 (big endian)
-            'sh2a':      None,  # - Renesas SH-2A (big endian)
-            'avr':       None,  # - ATMEL AVR                      (ATMEL family)
-            'h8300':     None,  # - H8/300x in normal mode
-            'h8300a':    None,  # - H8/300x in advanced mode
-            'h8s300':    None,  # - H8S in normal mode
-            'h8s300a':   None,  # - H8S in advanced mode
-            'h8500':     None,  # - H8/500                         (Hitachi H8/500 family)
-            'pic12cxx':  None,  # - Microchip PIC 12-bit (12xxx)
-            'pic16cxx':  None,  # - Microchip PIC 14-bit (16xxx)
-            'pic18cxx':  None,  # - Microchip PIC 16-bit (18xxx)
-            'alphab':    None,  # - DEC Alpha big endian
-            'alphal':    None,  # - DEC Alpha little endian
-            'hppa':      None,  # - HP PA-RISC big endian
-            'dsp56k':    None,  # - Motorola DSP 5600x
-            'dsp561xx':  None,  # - Motorola DSP 561xx
-            'dsp563xx':  None,  # - Motorola DSP 563xx
-            'dsp566xx':  None,  # - Motorola DSP 566xx
-            'c166':      None,  # - Siemens C166
-            'c166v1':    None,  # - Siemens C166 v1 family
-            'c166v2':    None,  # - Siemens C166 v2 family
-            'st10':      None,  # - SGS-Thomson ST10
-            'super10':   None,  # - Super10
-            'st20':      None,  # - SGS-Thomson ST20/C1
-            'st20c4':    None,  # - SGS-Thomson ST20/C2-C4
-            'st7':       None,  # - SGS-Thomson ST7
-            'ia64l':     None,  # - Intel Itanium little endian
-            'ia64b':     None,  # - Intel Itanium big endian
-            'cli':       None,  # - Microsoft.Net platform
-            'net':       None,  # - Microsoft.Net platform (alias)
-            'i960l':     None,  # - Intel 960 little endian
-            'i960b':     None,  # - Intel 960 big endian
-            'f2mc16l':   None,  # - Fujitsu F2MC-16L
-            'f2mc16lx':  None,  # - Fujitsu F2MC-16LX
-            '78k0':      None,  # - NEC 78k/0
-            '78k0s':     None,  # - NEC 78k/0s
-            'm740':      None,  # - Mitsubishi 8-bit
-            'm7700':     None,  # - Mitsubishi 16-bit
-            'm7750':     None,  # - Mitsubishi 16-bit
-            'm32r':      None,  # - Mitsubishi 32-bit
-            'm32rx':     None,  # - Mitsubishi 32-bit extended
-            'st9':       None,  # - STMicroelectronics ST9+
-            'fr':        None,  # - Fujitsu FR family
-            'm7900':     None,  # - Mitsubishi M7900
-            'kr1878':    None,  # - Angstrem KR1878
-            'ad218x':    None,  # - Analog Devices ADSP
-            'oakdsp':    None,  # - Atmel OAK DSP
-            'tricore':   None,  # - Infineon Tricore
-            'ebc':       None,  # - EFI Bytecode
-            'msp430':    None,  # - Texas Instruments MSP430
-        }
-
-        procname = self.api.idaapi.get_inf_structure().procname
-        cs_arch = PROC_CS_MAP.get(procname)
-        if cs_arch is None:
-            raise NotImplementedError('disassembly not supported on arch: ' + procname)
-
-        for seg in idb.analysis.Segments(self.idb).segments.values():
-            seg_range = (seg.startEA, seg.endEA)
-            if seg.bitness == 0:
-                if 16 not in self.bit_dis:
-                    self.bit_dis[16] = capstone.Cs(cs_arch, capstone.CS_MODE_16)
-                    self.bit_dis[16].detail = True
-                self.seg_dis[seg_range] = self.bit_dis[16]
-            elif seg.bitness == 1:
-                if 32 not in self.bit_dis:
-                    self.bit_dis[32] = capstone.Cs(cs_arch, capstone.CS_MODE_32)
-                    self.bit_dis[32].detail = True
-                self.seg_dis[seg_range] = self.bit_dis[32]
-            elif seg.bitness == 2:
-                if 64 not in self.bit_dis:
-                    self.bit_dis[64] = capstone.Cs(cs_arch, capstone.CS_MODE_64)
-                    self.bit_dis[64].detail = True
-                self.seg_dis[seg_range] = self.bit_dis[64]
-            else:
-                raise NotImplementedError('unknown bitness: %d' % (seg.bitness))
 
     def _disassemble(self, ea):
+        import capstone
+
         size = self.ItemSize(ea)
-        buf = self.GetManyBytes(ea, size)
-        self._load_dis()
+        inst_buf = self.GetManyBytes(ea, size)
+        segment = self._get_segment(ea)
+        bitness = 16 << segment.bitness# 16, 32, 64
+        procname = self.api.idaapi.get_inf_structure().procname.lower()
 
         dis = None
-        for (seg_start, seg_end), dis in self.seg_dis.items():
-            if seg_start <= ea < seg_end:
-                break
+        if procname == "arm" and bitness == 64:
+            dis = self._load_dis(capstone.CS_ARCH_ARM64, capstone.CS_MODE_ARM)
+        elif procname == "arm" and bitness == 32:
+            if size == 2:
+                dis = self._load_dis(capstone.CS_ARCH_ARM, capstone.CS_MODE_THUMB)
+            else:
+                dis = self._load_dis(capstone.CS_ARCH_ARM, capstone.CS_MODE_ARM)
+        elif procname in ['metapc', '8086', '80286r', '80286p', '80386r', '80386p','80486r', '80486p', '80586r', '80586p', '80686p', 'k62', 'p2', 'p3', 'athlon', 'p4', '8085']:
+            if bitness == 16:
+                dis = self._load_dis(capstone.CS_ARCH_X86, capstone.CS_MODE_16)
+            elif bitness == 32:
+                dis = self._load_dis(capstone.CS_ARCH_X86, capstone.CS_MODE_32)
+            elif bitness == 64:
+                dis = self._load_dis(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+        elif procname == "mipsb":
+            if bitness == 32:
+                dis = self._load_dis(capstone.CS_ARCH_MIPS, capstone.CS_MODE_MIPS32 | capstone.CS_MODE_BIG_ENDIAN)
+            elif bitness == 64:
+                dis = self._load_dis(capstone.CS_ARCH_MIPS, capstone.CS_MODE_MIPS64 | capstone.CS_MODE_BIG_ENDIAN)
+        elif procname == "mipsl":
+            if bitness == 32:
+                dis = self._load_dis(capstone.CS_ARCH_MIPS, capstone.CS_MODE_MIPS32 | capstone.CS_MODE_LITTLE_ENDIAN)
+            elif bitness == 64:
+                dis = self._load_dis(capstone.CS_ARCH_MIPS, capstone.CS_MODE_MIPS64 | capstone.CS_MODE_LITTLE_ENDIAN)
 
         if dis is None:
-            raise ValueError('failed to find ea in valid segment: ' + hex(ea))
+            raise NotImplementedError("unknown arch %s bit:%s inst_len:%d" % (procname, bitness, len(inst_buf)))
+        dis.detail = True
 
         try:
-            op = next(dis.disasm(buf, ea))
+            op = next(dis.disasm(inst_buf, ea))
         except StopIteration:
             raise RuntimeError('failed to disassemble %s' % (hex(ea)))
         else:
@@ -889,25 +782,7 @@ class idc:
             raise ValueError('unknown attr: %x' % (attr))
 
     def GetFunctionName(self, ea):
-        func = self.api.ida_funcs.get_func(ea)
-        # ensure this is a function
-        if func.startEA != ea:
-            raise KeyError(ea)
-
-        # shouldn't be a chunk
-        if is_flag_set(func.flags, func.FUNC_TAIL):
-            raise KeyError(ea)
-
-        nn = self.api.ida_netnode.netnode(ea)
-        try:
-            return nn.name()
-        except:
-            if self.idb.wordsize == 4:
-                return 'sub_%04x' % (ea)
-            elif self.idb.wordsize == 8:
-                return 'sub_%08x' % (ea)
-            else:
-                raise RuntimeError('unexpected wordsize')
+        return self.api.ida_funcs.get_func_name(ea)
 
     def LocByName(self, name):
         try:
@@ -1053,6 +928,22 @@ class idc:
     def get_optype_flags1(flags):
         return flags & FLAGS.MS_1TYPE
 
+    def LineA(self, ea, num):
+        nn = self.api.ida_netnode.netnode(ea)
+        # 1000 looks like a magic number, and it sorta is.
+        # S-1000, 1001, 1002, ... are where anterior lines are
+        try:
+            return nn.supstr(tag='S', index=1000 + num)
+        except KeyError:
+            return ''
+
+    def LineB(self, ea, num):
+        nn = self.api.ida_netnode.netnode(ea)
+        try:
+            return nn.supstr(tag='S', index=2000 + num)
+        except KeyError:
+            return ''
+
 
 class ida_bytes:
     def __init__(self, db, api):
@@ -1073,8 +964,11 @@ class ida_bytes:
         except KeyError:
             return ''
 
+    def get_flags(self, ea):
+        return self.api.idc.GetFlags(ea)
+
     @staticmethod
-    def isFunc(flags):
+    def is_func(flags):
         return flags & FLAGS.MS_CODE == FLAGS.FF_FUNC
 
     @staticmethod
@@ -1082,39 +976,39 @@ class ida_bytes:
         return flags & FLAGS.MS_CODE == FLAGS.FF_IMMD
 
     @staticmethod
-    def isCode(flags):
+    def is_code(flags):
         return flags & FLAGS.MS_CLS == FLAGS.FF_CODE
 
     @staticmethod
-    def isData(flags):
+    def is_data(flags):
         return flags & FLAGS.MS_CLS == FLAGS.FF_DATA
 
     @staticmethod
-    def isTail(flags):
+    def is_tail(flags):
         return flags & FLAGS.MS_CLS == FLAGS.FF_TAIL
 
     @staticmethod
-    def isNotTail(flags):
-        return not ida_bytes.isTail(flags)
+    def is_not_tail(flags):
+        return not ida_bytes.is_tail(flags)
 
     @staticmethod
-    def isUnknown(flags):
+    def is_unknown(flags):
         return flags & FLAGS.MS_CLS == FLAGS.FF_UNK
 
     @staticmethod
-    def isHead(flags):
+    def is_head(flags):
         return ida_bytes.isCode(flags) or ida_bytes.isData(flags)
 
     @staticmethod
-    def isFlow(flags):
+    def is_flow(flags):
         return flags & FLAGS.MS_COMM & FLAGS.FF_FLOW > 0
 
     @staticmethod
-    def isVar(flags):
+    def is_var(flags):
         return flags & FLAGS.MS_COMM & FLAGS.FF_VAR > 0
 
     @staticmethod
-    def hasExtra(flags):
+    def has_extra_cmts(flags):
         return flags & FLAGS.MS_COMM & FLAGS.FF_LINE > 0
 
     @staticmethod
@@ -1122,7 +1016,7 @@ class ida_bytes:
         return flags & FLAGS.MS_COMM & FLAGS.FF_COMM > 0
 
     @staticmethod
-    def hasRef(flags):
+    def has_ref(flags):
         return flags & FLAGS.MS_COMM & FLAGS.FF_REF > 0
 
     @staticmethod
@@ -1157,39 +1051,43 @@ class ida_bytes:
         return flags & FLAGS.MS_COMM & FLAGS.FF_BNOT > 0
 
     @staticmethod
-    def isByte(flags):
+    def has_value(flags):
+        return (flags & FLAGS.FF_IVL) > 0
+
+    @staticmethod
+    def is_byte(flags):
         return flags & FLAGS.DT_TYPE == FLAGS.FF_BYTE
 
     @staticmethod
-    def isWord(flags):
+    def is_word(flags):
         return flags & FLAGS.DT_TYPE == FLAGS.FF_WORD
 
     @staticmethod
-    def isDwrd(flags):
+    def is_dword(flags):
         return flags & FLAGS.DT_TYPE == FLAGS.FF_DWRD
 
     @staticmethod
-    def isQwrd(flags):
+    def is_qword(flags):
         return flags & FLAGS.DT_TYPE == FLAGS.FF_QWRD
 
     @staticmethod
-    def isOwrd(flags):
+    def is_oword(flags):
         return flags & FLAGS.DT_TYPE == FLAGS.FF_OWRD
 
     @staticmethod
-    def isYwrd(flags):
+    def is_yword(flags):
         return flags & FLAGS.DT_TYPE == FLAGS.FF_YWRD
 
     @staticmethod
-    def isTbyt(flags):
+    def is_tbyte(flags):
         return flags & FLAGS.DT_TYPE == FLAGS.FF_TBYT
 
     @staticmethod
-    def isFloat(flags):
+    def is_float(flags):
         return flags & FLAGS.DT_TYPE == FLAGS.FF_FLOAT
 
     @staticmethod
-    def isDouble(flags):
+    def is_double(flags):
         return flags & FLAGS.DT_TYPE == FLAGS.FF_DOUBLE
 
     @staticmethod
@@ -1201,23 +1099,41 @@ class ida_bytes:
         return flags & FLAGS.DT_TYPE == FLAGS.FF_ASCI
 
     @staticmethod
-    def isStruct(flags):
+    def is_struct(flags):
         return flags & FLAGS.DT_TYPE == FLAGS.FF_STRU
 
     @staticmethod
-    def isAlign(flags):
+    def is_align(flags):
         return flags & FLAGS.DT_TYPE == FLAGS.FF_ALIGN
 
     @staticmethod
-    def is3byte(flags):
+    def is_3_byte(flags):
         return flags & FLAGS.DT_TYPE == FLAGS.FF_3BYTE
 
     @staticmethod
-    def isCustom(flags):
+    def is_custom(flags):
         return flags & FLAGS.DT_TYPE == FLAGS.FF_CUSTOM
 
     def get_bytes(self, ea, count):
         return self.api.idc.GetManyBytes(ea, count)
+
+    def next_that(self, ea, maxea, testf):
+        for i in range(ea+1, maxea):
+            flags = self.get_flags(i)
+            if testf(flags):
+                return i
+        return self.api.idc.BADADDR
+
+    def next_not_tail(self, ea):
+        while True:
+            ea += 1
+            flags = self.get_flags(ea)
+            if not self.is_tail(flags):
+                break
+        return ea
+
+    def next_inited(self, ea, maxea):
+        return self.next_that(ea, maxea, lambda flags: ida_bytes.has_value(flags))
 
 
 class ida_nalt:
@@ -1324,9 +1240,14 @@ class ida_nalt:
             funcname = nn.supstr(funcaddr)
             if not py_cb(funcaddr, funcname, None):
                 return
-    
+
     def get_imagebase(self):
-        return idb.analysis.Root(self.idb).imagebase
+        try:
+            return idb.analysis.Root(self.idb).imagebase
+        except KeyError:
+            # seems that the key is not present in all databases,
+            # particularly those with an imagebase of 0x0.
+            return 0x0
 
         # TODO: where to fetch ordinal?
 
@@ -1435,16 +1356,38 @@ class ida_funcs:
         except KeyError:
             return ''
 
+    def get_func_name(self, ea):
+        func = self.get_func(ea)
+        # ensure this is a function
+        if func.startEA != ea:
+            raise KeyError(ea)
+
+        # shouldn't be a chunk
+        if is_flag_set(func.flags, func.FUNC_TAIL):
+            raise KeyError(ea)
+
+        nn = self.api.ida_netnode.netnode(ea)
+        try:
+            return nn.name()
+        except:
+            if self.idb.wordsize == 4:
+                return 'sub_%04x' % (ea)
+            elif self.idb.wordsize == 8:
+                return 'sub_%08x' % (ea)
+            else:
+                raise RuntimeError('unexpected wordsize')
+
 
 class BasicBlock(object):
     '''
     interface extracted from: https://raw.githubusercontent.com/gabtremblay/idabearclean/master/idaapi.py
     '''
 
-    def __init__(self, flowchart, startEA, endEA):
+    def __init__(self, flowchart, startEA, lastInstEA, endEA):
         self.fc = flowchart
         self.id = startEA
         self.startEA = startEA
+        self.lastInstEA = lastInstEA
         self.endEA = endEA
         # types are declared here:
         #  https://www.hex-rays.com/products/ida/support/sdkdoc/gdl_8hpp.html#afa6fb2b53981d849d63273abbb1624bd
@@ -1527,6 +1470,9 @@ class idaapi:
             ea = self.api.idc.NextHead(ea)
 
             flags = self.api.idc.GetFlags(ea)
+            if flags == 0:
+                return last_ea
+
             if self.api.ida_bytes.hasRef(flags):
                 return last_ea
 
@@ -1571,7 +1517,7 @@ class idaapi:
         # need to fixup the return types, though.
 
         flags = self.api.idc.GetFlags(ea)
-        if self.api.ida_bytes.isFlow(flags):
+        if flags is not None and self.api.ida_bytes.isFlow(flags):
             # prev instruction fell through to this insn
             yield idb.analysis.Xref(self.api.idc.PrevHead(ea), ea, idaapi.fl_F)
 
@@ -1587,7 +1533,7 @@ class idaapi:
 
         nextea = self.api.idc.NextHead(ea)
         nextflags = self.api.idc.GetFlags(nextea)
-        if self.api.ida_bytes.isFlow(nextflags):
+        if nextflags is not None and self.api.ida_bytes.isFlow(nextflags):
             # instruction falls through to next insn
             yield idb.analysis.Xref(ea, nextea, idaapi.fl_F)
 
@@ -1638,11 +1584,12 @@ class idaapi:
                 # map from startEA to set of startEA
                 succs = collections.defaultdict(lambda: set([]))
 
-                endEA = api.idaapi._find_bb_end(ea)
-                logger.debug('found end. %x -> %x', ea, endEA)
-                block = BasicBlock(self, ea, endEA)
+                lastInstEA = api.idaapi._find_bb_end(ea)
+
+                logger.debug('found end. %x -> %x', ea, lastInstEA)
+                block = BasicBlock(self, ea, lastInstEA, api.idc.NextHead(lastInstEA))
                 bbs_by_start[ea] = block
-                bbs_by_end[endEA] = block
+                bbs_by_end[lastInstEA] = block
 
                 q = [block]
 
@@ -1664,9 +1611,9 @@ class idaapi:
                     for xref in api.idaapi._get_flow_preds(block.startEA):
                         if xref.src not in bbs_by_end:
                             pred_start = api.idaapi._find_bb_start(xref.src)
-                            pred = BasicBlock(self, pred_start, xref.src)
+                            pred = BasicBlock(self, pred_start, xref.src, api.idc.NextHead(xref.src))
                             bbs_by_start[pred.startEA] = pred
-                            bbs_by_end[pred.endEA] = pred
+                            bbs_by_end[pred.lastInstEA] = pred
                         else:
                             pred = bbs_by_end[xref.src]
 
@@ -1676,12 +1623,12 @@ class idaapi:
                         succs[pred.startEA].add(block.startEA)
                         q.append(pred)
 
-                    for xref in api.idaapi._get_flow_succs(block.endEA):
+                    for xref in api.idaapi._get_flow_succs(block.lastInstEA):
                         if xref.dst not in bbs_by_start:
                             succ_end = api.idaapi._find_bb_end(xref.dst)
-                            succ = BasicBlock(self, xref.dst, succ_end)
+                            succ = BasicBlock(self, xref.dst, succ_end, api.idc.NextHead(succ_end))
                             bbs_by_start[succ.startEA] = succ
-                            bbs_by_end[succ.endEA] = succ
+                            bbs_by_end[succ.lastInstEA] = succ
                         else:
                             succ = bbs_by_start[xref.dst]
 
@@ -1735,11 +1682,170 @@ class idaapi:
     def get_inf_structure(self):
         return idb.analysis.Root(self.idb).idainfo
 
+    def get_imagebase(self):
+        return self.api.ida_nalt.get_imagebase()
+
+
+class StringItem:
+    def __init__(self, ea, length, strtype, s):
+        self.ea = ea
+        self.length = length
+        self.strtype = strtype
+        self.s = s
+
+    def __str__(self):
+        return s
+
+
+class _Strings:
+    C = 0x0
+    C_16 = 0x1
+    C_32 = 0x2
+    PASCAL = 0x4
+    PASCAL_16 = 0x5
+    LEN2 = 0x8
+    LEN2_16 = 0x9
+    LEN4 =  0xC
+    LEN4_16 = 0xD
+
+    ASCII_BYTE = b" !\"#\$%&\'\(\)\*\+,-\./0123456789:;<=>\?@ABCDEFGHIJKLMNOPQRSTUVWXYZ\[\]\^_`abcdefghijklmnopqrstuvwxyz\{\|\}\\\~\t"
+
+    def __init__(self, db, api):
+        self.db = db
+        self.api = api
+
+        self.cache = None
+
+        self.strtypes = [0]
+        self.minlen = 5
+        self.only_7bit = True
+        self.ignore_instructions = False
+        self.display_only_existing_strings = False
+
+    def clear_cache(self):
+        self.cache = None
+
+    @memoized_method()
+    def get_seg_data(self, seg):
+        start = self.api.idc.SegStart(seg)
+        end = self.api.idc.SegEnd(start)
+
+        IdbByte = self.api.idc.IdbByte
+        get_flags = self.api.ida_bytes.get_flags
+        has_value = self.api.ida_bytes.has_value
+
+        data = []
+        for i in range(start, end):
+            b = IdbByte(i)
+            if b == 0:
+                flags = get_flags(i)
+                if not has_value(flags):
+                    break
+            data.append(b)
+
+        if six.PY2:
+            return ''.join(map(chr, data))
+        else:
+            return bytes(data)
+
+    def parse_C_strings(self, va, buf):
+        reg = b"([%s]{%d,})" % (_Strings.ASCII_BYTE, self.minlen)
+        ascii_re = re.compile(reg)
+        for match in ascii_re.finditer(buf):
+            s = match.group().decode('ascii')
+            yield StringItem(va + match.start(), len(s), _Strings.C, s)
+
+    def parse_C_16_strings(self, va, buf):
+        reg = b"((?:[%s]\x00){%d,})" % (_Strings.ASCII_BYTE, self.minlen)
+        uni_re = re.compile(reg)
+        for match in uni_re.finditer(buf):
+            try:
+                s = match.group().decode('utf-16')
+            except UnicodeDecodeError:
+                continue
+            else:
+                yield StringItem(va + match.start(), len(s), _Strings.C_16, s)
+
+    def parse_C_32_strings(self, va, buf):
+        reg = b"((?:[%s]\x00\x00\x00){%d,})" % (_Strings.ASCII_BYTE, self.minlen)
+        uni_re = re.compile(reg)
+        for match in uni_re.finditer(buf):
+            try:
+                s = match.group().decode('utf-32')
+            except UnicodeDecodeError:
+                continue
+            else:
+                yield StringItem(va + match.start(), len(s), _Strings.C_32, s)
+
+    def parse_PASCAL_strings(self, va, buf):
+        raise NotImplementedError('parse PASCAL strings')
+
+    def parse_PASCAL_16_strings(self, va, buf):
+        raise NotImplementedError('parse PASCAL_16 strings')
+
+    def parse_LEN2_strings(self, va, buf):
+        raise NotImplementedError('parse LEN2 strings')
+
+    def parse_LEN2_16_strings(self, va, buf):
+        raise NotImplementedError('parse LEN2_16 strings')
+
+    def parse_LEN4_strings(self, va, buf):
+        raise NotImplementedError('parse LEN4 strings')
+
+    def parse_LEN4_16_strings(self, va, buf):
+        raise NotImplementedError('parse LEN4_16 strings')
+
+    def refresh(self):
+        ret = []
+        for seg in self.api.idautils.Segments():
+            buf = self.get_seg_data(seg)
+
+            for parser in (self.parse_C_strings,
+                           self.parse_C_16_strings,
+                           self.parse_C_32_strings,
+                           self.parse_PASCAL_strings,
+                           self.parse_PASCAL_16_strings,
+                           self.parse_LEN2_strings,
+                           self.parse_LEN2_16_strings,
+                           self.parse_LEN4_strings,
+                           self.parse_LEN4_16_strings):
+                try:
+                    ret.extend(list(parser(seg, buf)))
+                except NotImplementedError as e:
+                    logger.warning('warning: %s', e)
+        self.cache = ret[:]
+        return ret
+
+    def setup(self,
+              strtypes=[0],
+              minlen=5,
+              only_7bit=True,
+              ignore_instructions=False,
+              display_only_existing_strings=False):
+        self.strtypes = strtypes
+        self.minlen = minlen
+        self.only_7bit = only_7bit
+        self.ignore_instructions = ignore_instructions
+        self.display_only_existing_strings = display_only_existing_strings
+
+    def __iter__(self):
+        if self.cache is None:
+            self.refresh()
+
+        for s in self.cache:
+            yield s
+
+    def __getitem__(self, index):
+        if self.cache is None:
+            self.refresh()
+        return self.cache[index]
+
 
 class idautils:
     def __init__(self, db, api):
         self.idb = db
         self.api = api
+        self.strings = _Strings(db, api)
 
     def GetInputFileMD5(self):
         return self.api.idc.GetInputMD5()
@@ -1759,7 +1865,7 @@ class idautils:
     def CodeRefsTo(self, ea, flow):
         if flow:
             flags = self.api.idc.GetFlags(ea)
-            if self.api.ida_bytes.isFlow(flags):
+            if flags is not None and self.api.ida_bytes.isFlow(flags):
                 # prev instruction fell through to this insn
                 yield self.api.idc.PrevHead(ea)
 
@@ -1782,6 +1888,9 @@ class idautils:
         for xref in idb.analysis.get_crefs_from(self.idb, ea,
                                                 types=[idaapi.fl_JN, idaapi.fl_JF, idaapi.fl_F]):
             yield xref.dst
+
+    def Strings(self, default_setup=False):
+        return self.strings
 
 
 class ida_entry:
@@ -1821,6 +1930,23 @@ class ida_entry:
         return ents.forwarded_symbols.get(ordinal)
 
 
+class ida_name:
+    def __init__(self, db, api):
+        self.idb = db
+        self.api = api
+
+    def get_name(self, ea):
+        flags = self.api.ida_bytes.get_flags(ea)
+        if not self.api.ida_bytes.has_name(flags):
+            return ''
+
+        try:
+            nn = self.api.ida_netnode.netnode(ea)
+            return nn.name()
+        except KeyError:
+            return ''
+
+
 class IDAPython:
     def __init__(self, db, ScreenEA=None):
         self.idb = db
@@ -1834,3 +1960,4 @@ class IDAPython:
         self.ida_netnode = ida_netnode(db, self)
         self.ida_nalt = ida_nalt(db, self)
         self.ida_entry = ida_entry(db, self)
+        self.ida_name = ida_name(db, self)
